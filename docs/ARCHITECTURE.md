@@ -11,7 +11,7 @@ mexporter/
   README.md                 # User-facing documentation
   CHANGELOG.md              # Version history and changes
   RETROSPECTIVE.md          # Full run history, metrics, limitations
-  run_mexporter.ps1         # Autonomous launcher (no OpenCode needed)
+  run_mexporter.ps1         # Autonomous launcher (no extra runtime needed)
   .gitignore
   go/                       # Main Go module (Go 1.27, stdlib only)
     cmd/mexporter/
@@ -128,7 +128,7 @@ go test -coverprofile=cover.out ./... && go tool cover -func=cover.out
 
 ## IMAP Migration
 
-The `scripts/migrate_to_imap.py` script migrates exported `.eml` files to an IMAP server (e.g., `imap.spaceweb.ru`):
+The `scripts/migrate_to_imap.py` script migrates exported `.eml` files to an IMAP server (e.g., `imap.example.com`):
 - Uses Python stdlib only (`imaplib`, `email`, `argparse`, `json`, `pathlib`)
 - Supports config file (`scripts/config.json`) or CLI args
 - Supports SSL (993) and plain (143) connections

@@ -1,10 +1,20 @@
 # mexporter — Mail.ru / VK WorkSpace mailbox exporter
 
+## Why this tool exists / Зачем этот инструмент
+
+**RU**
+
+Внезапно Mail.ru сделал две неприятные вещи: заблокировал доступ к почте по POP3 и IMAP, сделав его платным, и поднял в разы тарифы для тех, кто хостит почту у него. В итоге почта у регистратора домена или на VPS стала дешёвым решением. Встал вопрос: как вытянуть всю почту? Этот набор решает задачу — он скачивает письма из выбранных папок локально и позволяет загрузить их на новый IMAP-сервер.
+
+**EN**
+
+Mail.ru suddenly did two unpleasant things: it blocked POP3 and IMAP access to mail by making it paid, and raised tariffs several-fold for those hosting mail with them. As a result, mail at a domain registrar or on a VPS became a cheap solution. The question arose: how to pull out all the mail? This toolkit solves that — it downloads messages from selected folders locally and lets you upload them to a new IMAP server.
+
 Export your Mail.ru email to local `.eml` files. No IMAP/POP3 needed — uses the public web API (captured via Playwright).
 
 > **Status (19.11.2026):** полный экспорт `user@mail_ru_hosted_domain` завершен: 127 829 `.eml`, 6,42 ГБ, 0 ошибок. Экспорт второго ящика `user@mail_ru_hosted_domain`: 1 202 `.eml`, 247,54 МБ, 0 ошибок. Бинарник `go\mexporter.exe` пересобран, `go vet` чистый, покрытие тестами 86,6 %+. Сессия обновлена из залогиненного Playwright-браузера.
 
-> **IMAP Migration:** После экспорта `.eml` файлов их можно загрузить на IMAP-сервер (`imap.spaceweb.ru`) через [scripts/migrate_to_imap.py](scripts/README.md).
+> **IMAP Migration:** После экспорта `.eml` файлов их можно загрузить на IMAP-сервер (`imap.example.com`) через [scripts/migrate_to_imap.py](scripts/README.md).
 
 ## Quick start (Windows)
 
@@ -133,13 +143,12 @@ mail-export/
 
 - `CHANGELOG.md` — история изменений проекта (даты, функции, исправления).
 - `RETROSPECTIVE.md` — полная история запусков, метрики, ограничения (для разработчика/аналитика).
-- `.opencode/NOTES.md` — Rolling session log (внутренний, сюда статус‑документы не пишите).
-- Бинарник **самостоятельный** — после сборки `go build -o mexporter.exe ./cmd/mexporter` его можно скопировать на любую Windows‑машину с Go 1.27+ в PATH и запускать без OpenCode, Playwright или иного runtime. Ему нужно только `session/session.json` и флаги.
+- Бинарник **самостоятельный** — после сборки `go build -o mexporter.exe ./cmd/mexporter` его можно скопировать на любую Windows‑машину с Go 1.27+ в PATH и запускать автономно. Ему нужно только `session/session.json` и флаги.
 
 ---
-Built with Go 1.27, стандартная библиотека только. Backup sources in `.opencode/backup/`.
+Built with Go 1.27, стандартная библиотека только.
 
-## run_mexporter.ps1 — автономный запуск без OpenCode
+## run_mexporter.ps1 — автономный запуск
 
 Скрипт `run_mexporter.ps1` позволяет запускать экспорт на любой Windows‑машине, где установлен Go 1.27+:
 - Автоматически собирает `go\mexporter.exe`, если бинарник отсутствует.
@@ -150,4 +159,4 @@ Built with Go 1.27, стандартная библиотека только. Ba
 ```powershell
 powershell -ExecutionPolicy Bypass -File run_mexporter.ps1 -list
 ```
-или просто `.\run_mexporter.ps1 -list` из PowerShell."# escape-mailru"  git init git add README.md git commit -m "first commit" git branch -M main git remote add origin https://github.com/hzcht/escape-mailru.git git push -u origin main
+или просто `.\run_mexporter.ps1 -list` из PowerShell.

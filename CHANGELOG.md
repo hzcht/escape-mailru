@@ -3,7 +3,7 @@
 ## [2026-11-19] — IMAP Migration Script Added
 
 - ✅ Added `scripts/migrate_to_imap.py` — Python stdlib IMAP migration script
-  - Migrates `.eml` files from local folders to IMAP servers (`imap.spaceweb.ru`)
+  - Migrates `.eml` files from local folders to IMAP servers (`imap.example.com`)
   - Uses only Python 3 standard library (`imaplib`, `email`, `argparse`, `json`, `pathlib`)
   - Config file (`scripts/config.json`) + CLI arguments support
   - SSL (port 993) and plain (port 143) connections

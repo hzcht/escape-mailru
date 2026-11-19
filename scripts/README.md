@@ -30,11 +30,11 @@
 
 ```json
 {
-  "server": "imap.spaceweb.ru",
+  "server": "imap.example.com",
   "port": 993,
-  "login": "your_email@domain.ru",
+  "login": "user@example.com",
   "password": "your_password",
-  "eml_folder": "C:\\Path\\To\\EML\\Folder"
+  "eml_folder": "C:\\path\\to\\eml"
 }
 ```
 
@@ -52,7 +52,7 @@ python migrate_to_imap.py --config config.json
 **С аргументами командной строки:**
 
 ```powershell
-python migrate_to_imap.py --server imap.spaceweb.ru --port 993 --login user@domain.ru --password your_password --folder "C:\mails\eml"
+python migrate_to_imap.py --server imap.example.com --port 993 --login user@example.com --password "your_password" --folder "C:\path\to\eml"
 ```
 
 **С миксом конфига и аргументов:**
@@ -64,7 +64,7 @@ python migrate_to_imap.py --server imap.spaceweb.ru --port 993 --login user@doma
 | Аргумент | По умолчанию | Описание |
 |----------|-------------|----------|
 | `--config` | — | Путь к JSON-файлу конфигурации |
-| `--server` | `imap.spaceweb.ru` | IMAP сервер |
+| `--server` | `imap.example.com` | IMAP сервер |
 | `--port` | `993` | Порт IMAP (993 для SSL, 143 для plain) |
 | `--login` | `""` | Email логин (из config если не указан) |
 | `--password` | `""` | Пароль (из config, prompt или env var) |

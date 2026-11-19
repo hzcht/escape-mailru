@@ -6,7 +6,7 @@
 #   python migrate_to_imap.py --config config.json
 #
 # Или с передачей параметров командной строки:
-#   python migrate_to_imap.py --server imap.spaceweb.ru --port 993 --login user@domain.ru --password --folder C:\mail-export\user@mail_ru_hosted_domain\Inbox
+#   python migrate_to_imap.py --server imap.example.com --port 993 --login user@example.com --password --folder C:\mail-export\user@mail_ru_hosted_domain\Inbox
 #
 # Требуется: Python 3 standard library (imaplib, email, os, argparse).
 # Примечание: для SMTP-сервера или другого порта может потребоваться adjustment.
@@ -29,8 +29,8 @@ def parse_args():
     parser.add_argument(
         "--server",
         type=str,
-        default="imap.spaceweb.ru",
-        help="IMAP сервер (по умолчанию: imap.spaceweb.ru)",
+        default="imap.example.com",
+        help="IMAP сервер (по умолчанию: imap.example.com)",
     )
     parser.add_argument(
         "--port",

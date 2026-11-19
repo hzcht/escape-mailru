@@ -1,7 +1,7 @@
 {
-  "server": "imap.spaceweb.ru",
+  "server": "imap.example.com",
   "port": 993,
-  "login": "user@domain.ru",
+  "login": "user@example.com",
   "password": "your_password",
-  "eml_folder": "C:\\path\\to\\your\\eml\\folder"
+  "eml_folder": "C:\\path\\to\\eml"
 }
