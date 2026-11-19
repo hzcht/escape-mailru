@@ -10,7 +10,6 @@ One-off web API exporter: captures Mail.ru/VK WorkSpace mailbox to `.eml` files 
 mexporter/
   README.md                 # User-facing documentation
   CHANGELOG.md              # Version history and changes
-  AGENTS.md                 # Dev invariants, commands, architecture (repo root)
   RETROSPECTIVE.md          # Full run history, metrics, limitations
   run_mexporter.ps1         # Autonomous launcher (no OpenCode needed)
   .gitignore

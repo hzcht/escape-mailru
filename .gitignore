@@ -2,10 +2,14 @@
 mail-export/
 mail-export-test/
 
+# Local-only agent instructions (not published)
+/AGENTS.md
+
 # Session data — contains cookies and access_token (secrets)
 session/
 mexporter.exe
 mexporter.json
+mexporter-*.json
 
 # Logs and temporary output from Playwright/session capture
 *.log

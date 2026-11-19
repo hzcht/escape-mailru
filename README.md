@@ -92,7 +92,6 @@ python migrate_to_imap.py --config config.json
 mexporter/
   README.md             # этот README
   CHANGELOG.md          # история изменений
-  AGENTS.md             # разработческие инварианты
   RETROSPECTIVE.md      # полная история запусков
   run_mexporter.ps1     # автономный запуск
   .gitignore
@@ -135,7 +134,6 @@ mail-export/
 - `CHANGELOG.md` — история изменений проекта (даты, функции, исправления).
 - `RETROSPECTIVE.md` — полная история запусков, метрики, ограничения (для разработчика/аналитика).
 - `.opencode/NOTES.md` — Rolling session log (внутренний, сюда статус‑документы не пишите).
-- `AGENTS.md` — разработческие инварианты, проверки и архитектура (внутри репозитория).
 - Бинарник **самостоятельный** — после сборки `go build -o mexporter.exe ./cmd/mexporter` его можно скопировать на любую Windows‑машину с Go 1.27+ в PATH и запускать без OpenCode, Playwright или иного runtime. Ему нужно только `session/session.json` и флаги.
 
 ---
