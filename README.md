@@ -13,7 +13,7 @@ Export your Mail.ru email to local `.eml` files. No IMAP/POP3 needed — uses th
 3. Run once to build and capture a session:
 
 ```powershell
-cd E:\proj\mexporter
+cd C:\path\to\mexporter
 powershell -ExecutionPolicy Bypass -File run_mexporter.ps1 -list
 ```
 
@@ -34,7 +34,7 @@ powershell -ExecutionPolicy Bypass -File run_mexporter.ps1 -list
 
 ## Commands
 
-All paths are relative to `E:\proj\mexporter` (the project root).
+All paths are relative to `C:\path\to\mexporter` (the project root).
 
 | Command | What it does |
 |---|---|
@@ -144,7 +144,7 @@ Built with Go 1.27, стандартная библиотека только. Ba
 Скрипт `run_mexporter.ps1` позволяет запускать экспорт на любой Windows‑машине, где установлен Go 1.27+:
 - Автоматически собирает `go\mexporter.exe`, если бинарник отсутствует.
 - Запускает его с переданными флагами или заходит в TUI по умолчанию.
-- Все пути относительно папки скрипта (`E:\proj\mexporter`).
+- Все пути относительно папки скрипта (`C:\path\to\mexporter`).
 
 Использование:
 ```powershell

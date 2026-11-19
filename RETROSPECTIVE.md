@@ -84,7 +84,7 @@ internal/tui           — выбор папок (raw console на Windows, line
 ## Запуск
 
 ```powershell
-cd E:\proj\mexporter\go
+cd C:\path\to\mexporter\go
 go build -o mexporter.exe ./cmd/mexporter
 
 .\mexporter.exe -session ..\session\session.json          # TUI

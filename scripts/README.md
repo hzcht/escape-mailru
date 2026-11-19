@@ -45,7 +45,7 @@
 **С конфигурационным файлом:**
 
 ```powershell
-cd E:\proj\mexporter\scripts
+cd C:\path\to\mexporter\scripts
 python migrate_to_imap.py --config config.json
 ```
 
