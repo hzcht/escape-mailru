@@ -1,0 +1,22 @@
+# Exported mail data — not source code (can be >6 GB)
+mail-export/
+mail-export-test/
+
+# Session data — contains cookies and access_token (secrets)
+session/
+mexporter.exe
+mexporter.json
+
+# Logs and temporary output from Playwright/session capture
+*.log
+export-*.log
+inbox-backfill.*
+resume.err
+run_output.txt
+.playwright-mcp/
+
+# Compiled binary — can be rebuilt with `go build`
+mexporter.exe
+
+# JSON files with session tokens (keep only if needed for dev)
+# *.json
