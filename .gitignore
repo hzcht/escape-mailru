@@ -17,3 +17,8 @@ run_*
 
 # JSON files with session tokens (keep only if needed for dev)
 # *.json
+
+# Python bytecode cache (from migration scripts)
+__pycache__/
+*.pyc
+scripts/migrate_to_imap.cpython-*.pyc

@@ -4,6 +4,8 @@ Export your Mail.ru email to local `.eml` files. No IMAP/POP3 needed — uses th
 
 > **Status (19.11.2026):** полный экспорт `user@mail_ru_hosted_domain` завершен: 127 829 `.eml`, 6,42 ГБ, 0 ошибок. Экспорт второго ящика `user@mail_ru_hosted_domain`: 1 202 `.eml`, 247,54 МБ, 0 ошибок. Бинарник `go\mexporter.exe` пересобран, `go vet` чистый, покрытие тестами 86,6 %+. Сессия обновлена из залогиненного Playwright-браузера.
 
+> **IMAP Migration:** После экспорта `.eml` файлов их можно загрузить на IMAP-сервер (`imap.spaceweb.ru`) через [scripts/migrate_to_imap.py](scripts/README.md).
+
 ## Quick start (Windows)
 
 1. **Install Go 1.27+** and add `go` to PATH.
@@ -73,9 +75,36 @@ All paths are relative to `E:\proj\mexporter` (the project root).
 - `mail-export/` может вырасти до **~6,4 GB** и **127 k файлов**. Не сканируйте его рекурсивно — используйте `export-log.json` / `.jsonl` для статистики.
 - TUI без реальной консоли переходит в **line‑fallback** (номированный ввод) — частичный piped‑выбор аннулирует работу. Не автоматизируйте селектор.
 
+## IMAP Migration (scripts/)
+
+После экспорта `.eml` файлов их можно загрузить на IMAP-сервер через `scripts/migrate_to_imap.py`:
+
+```powershell
+cd scripts
+python migrate_to_imap.py --config config.json
+```
+
+См. [scripts/README.md](scripts/README.md) для полной документации.
+
 ## Output structure
 
 ```
+mexporter/
+  README.md             # этот README
+  CHANGELOG.md          # история изменений
+  AGENTS.md             # разработческие инварианты
+  RETROSPECTIVE.md      # полная история запусков
+  run_mexporter.ps1     # автономный запуск
+  .gitignore
+  go/                   # исходный код (Go 1.27)
+    cmd/mexporter/
+    internal/
+  scripts/
+    migrate_to_imap.py  # IMAP migration script (Python stdlib)
+    README.md           # документация для скрипта
+  mail-export/          # экспорт .eml файлов (не в git)
+  session/              # session.json (не в git — секрет)
+
 mail-export/
   user@mail_ru_hosted_domain/
     Inbox/
@@ -103,6 +132,7 @@ mail-export/
 
 ## What else?
 
+- `CHANGELOG.md` — история изменений проекта (даты, функции, исправления).
 - `RETROSPECTIVE.md` — полная история запусков, метрики, ограничения (для разработчика/аналитика).
 - `.opencode/NOTES.md` — Rolling session log (внутренний, сюда статус‑документы не пишите).
 - `AGENTS.md` — разработческие инварианты, проверки и архитектура (внутри репозитория).
