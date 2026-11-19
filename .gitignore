@@ -9,14 +9,11 @@ mexporter.json
 
 # Logs and temporary output from Playwright/session capture
 *.log
-export-*.log
+export-*
 inbox-backfill.*
-resume.err
-run_output.txt
+resume.*
+run_*
 .playwright-mcp/
-
-# Compiled binary — can be rebuilt with `go build`
-mexporter.exe
 
 # JSON files with session tokens (keep only if needed for dev)
 # *.json
