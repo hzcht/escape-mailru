@@ -13,6 +13,7 @@ mexporter-*.json
 
 # Logs and temporary output from Playwright/session capture
 *.log
+.notes
 export-*
 inbox-backfill.*
 resume.*
