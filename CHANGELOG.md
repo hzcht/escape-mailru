@@ -5,8 +5,8 @@
 ### Added
 - `-refresh-session` refreshes the web-session `token` from the mail UI bootstrap using the stored cookies, without opening a browser.
 - Session files accept the current web-session `token` field (sent as the `token` query parameter next to the cookies) in addition to the older `access_token`.
-- Session bootstrap mode (`-init-session`, mode 0): open browser for manual sign-in, import session JSON, save session file, and continue. Existing session files require `-force`.
-- Automatic session capture through a debuggable Chrome/Edge window during `-init-session`: the app reads `access_token`, e-mail, CSRF token and cookies from the browser's own traffic and falls back to manual JSON import when the browser cannot be driven.
+- Session bootstrap mode (`-init-session`, mode 0): open the browser for sign-in, capture the session automatically (manual session JSON import as fallback), save the session file, and continue. Existing session files require `-force`.
+- Automatic session capture through a debuggable Chrome/Edge window during `-init-session`: the app reads cookies, the e-mail address and token candidates from the browser's own traffic (every open tab is watched) and falls back to manual JSON import when the browser cannot be driven.
 - Offline integrity check (`-verify`, `-verify-hash`) comparing journal records with files, including optional SHA-256.
 - Machine-readable output (`-json`) for folder lists, export summaries, and verify reports.
 - Exact `-limit` semantics: the run attempts at most N messages.

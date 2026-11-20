@@ -22,7 +22,7 @@ This project evolved from manual/UI-driven mailbox export experiments into a CLI
 ## Usability and usage scenarios
 
 ### First run (mode 0)
-- Session setup is a guided flow: open the login page, sign in manually, import session JSON, save it, and continue.
+- Session setup is a guided flow: open the login page, sign in, capture cookies and the web-session token automatically (manual session JSON import as a fallback), save the session file, and continue.
 - Required session fields are validated before saving; invalid input fails early with a clear error.
 - The session file is written atomically and treated as secret.
 
@@ -55,7 +55,7 @@ This project evolved from manual/UI-driven mailbox export experiments into a CLI
 
 ## Operational notes
 
-- Session/authentication material expires and must be refreshed (for example via `-init-session -force`).
+- Session/authentication material expires and must be refreshed (for example via `-refresh-session`, or a full re-login with `-init-session -force`).
 - Very large exports require careful log-based inspection rather than full directory scans.
 - Concurrent exporter instances against the same account directory are blocked by a lock file; stale locks age out and `-force` removes them.
 - API rate limits and transient failures are retried with backoff and `Retry-After` hints; permanent client errors are not retried.

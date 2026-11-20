@@ -10,7 +10,7 @@
 session -> mailapi -> layout -> config/TUI -> journal -> exporter
 ```
 
-1. **Session**: load and validate authentication material. With `-init-session` (mode 0), the CLI can guide manual browser sign-in and import/save session JSON before continuing.
+1. **Session**: load and validate authentication material. With `-init-session` (mode 0), the CLI opens a debuggable browser for sign-in, captures cookies and the web-session token from the browser's own traffic (manual session JSON import as a fallback), and validates the result against the API before saving. `-refresh-session` renews the web-session token from stored cookies without a browser.
 2. **Mail API**: list folders, enumerate threads/messages, expand threads, download raw `.eml` data.
 3. **Layout**: map provider folders to local paths and generate safe filenames.
 4. **Config/TUI**: resolve runtime settings and folder selection.
@@ -30,6 +30,7 @@ go/
     journal/          JSONL log + JSON snapshot
     exporter/         Export orchestration and workers
     tui/              Folder selection UI/fallback
+    cdp/              Chrome DevTools Protocol client (browser session capture)
 scripts/              Helper scripts (e.g. IMAP migration)
 docs/                 Project documentation
 ```
@@ -37,14 +38,16 @@ docs/                 Project documentation
 ## Core components
 
 ### Session
-- Reads session/auth data from a local file.
-- Supports guided bootstrap/import via `-init-session` (open browser for manual sign-in, then import and save session JSON).
+- Reads session/auth data from a local file (`cookies` plus a `token` or legacy `access_token`).
+- Supports guided bootstrap via `-init-session`: open a debuggable browser for sign-in, capture cookies and the web-session token from the browser traffic (manual session JSON import as a fallback), check the candidate against the API, then save.
+- Supports token renewal via `-refresh-session` using stored cookies only (no browser).
 - Supplies credentials/tokens required by API requests.
 - Authentication failures are surfaced to the caller (exit code signaling handled at CLI level).
 
 ### Mail API client
 - Performs read-only requests for folder and message/thread data.
 - Downloads message content without mutating mailbox state.
+- Fetches the web-session token from the mail UI inbox bootstrap (`FetchWebToken`) and probes the API (`Probe`) to confirm a session before it is saved or refreshed.
 - Owns transport retries: exponential backoff, `Retry-After` handling, and no retry for permanent 4xx responses.
 - Captures bounded error bodies for diagnostics and tunes the HTTP transport for multiple workers.
 

@@ -15,10 +15,71 @@
 - Single-instance lock per account output directory
 - Deterministic local file layout per account/folder
 
+## Быстрый старт (для новичка)
+
+Пошаговая инструкция, если вы запускаете программу впервые. Ничего устанавливать не нужно: в архиве уже лежит готовый бинарник.
+
+### Шаг 1. Скачайте и распакуйте архив
+
+- **Windows**: скачайте `mexporter-windows-x64.zip`, распакуйте в простую папку, например `C:\mexporter`.
+- **Linux**: скачайте `mexporter-linux-x64.tar.gz`, распакуйте командой `tar -xzf mexporter-linux-x64.tar.gz` и сделайте бинарник исполняемым: `chmod +x mexporter`.
+
+Внутри архива:
+
+| Элемент | Что это |
+| --- | --- |
+| `mexporter` / `mexporter.exe` | сама программа |
+| `README.md` | эта инструкция |
+| `mexporter.json` | настройки (уже заполнены по умолчанию, менять не обязательно) |
+| `session/` | сюда сохраняются данные входа в почту — **секрет, никому не отправляйте** |
+| `mail-export/` | сюда складываются экспортированные письма |
+
+### Шаг 2. Войдите в почту (только при первом запуске)
+
+Откройте терминал именно в папке с программой:
+
+- **Windows**: откройте папку в проводнике, в строке адреса наберите `cmd` и нажмите Enter;
+- **Linux**: выполните `cd /путь/к/папке`.
+
+Введите команду и нажмите Enter:
+
+```text
+Windows:  mexporter.exe -init-session
+Linux:    ./mexporter -init-session
+```
+
+Откроется браузер со страницей входа — войдите в почту как обычно. Когда почта откроется, вернитесь в терминал и нажмите Enter. Программа сама считает данные входа из браузера, проверит их через API и сохранит в `session/session.json`.
+
+### Шаг 3. Посмотрите список папок
+
+```text
+mexporter.exe -list
+```
+
+### Шаг 4. Начните экспорт
+
+```text
+mexporter.exe
+```
+
+Откроется интерактивный список папок почты: отметьте нужные пробелом (стрелки — навигация), Enter — старт. Письма появятся в `mail-export\<ваш адрес>\...`.
+
+Если экспорт прервали (закрыли окно, выключили компьютер) — просто запустите ту же команду снова: уже скачанные письма не повторяются, продолжение начнётся с места остановки.
+
+### Шаг 5. Если что-то пошло не так
+
+| Ситуация | Что делать |
+| --- | --- |
+| `authorization failed` или код выхода `2` | `mexporter.exe -refresh-session` — обновить вход без повторного логина. Не помогло → `mexporter.exe -init-session -force` — войти заново |
+| Нужно проверить, что все письма на месте | `mexporter.exe -verify` |
+| Хотите посмотреть, что будет скачано, ничего не скачивая | `mexporter.exe -folders 0 -dry-run -v` |
+
+Дальше — справка для остальных сценариев (запуск из исходников, справка по флагам, работа со скриптами).
+
 ## Requirements
 
-- Go 1.27 or newer
-- A valid session file with authentication data for the target mailbox
+- A prebuilt binary from the GitHub Releases page (no Go needed), or Go 1.27 or newer to build from source
+- A valid session file with authentication data for the target mailbox (create one with `-init-session`, see «Быстрый старт» above)
 
 ## Build
 
@@ -30,7 +91,7 @@ cd ..
 
 ## Usage
 
-Run commands from the project root.
+Run commands from the project root. Commands below use the source-tree layout (`.\go\mexporter.exe`); if you unpacked a release archive, run `.\mexporter.exe` (or `./mexporter` on Linux) from the archive folder — the flags are identical.
 
 ```powershell
 # First run: create/import session (mode 0), then continue
@@ -104,7 +165,7 @@ If you do not have a session file yet, run:
 This mode:
 1. Refuses to overwrite an existing session file unless `-force` is passed.
 2. Tries to capture the session automatically: it opens the login page in a debuggable Chrome/Edge window and you sign in manually. It then reads the session cookies from the browser and fetches the web-session token that the mail UI embeds into its inbox page (`/api/v1/user/short`). The resulting session is checked against the API before the file is written; if nothing is accepted, it falls back to manual import.
-3. Falls back to manual import if automatic capture cannot run: you export session JSON (fields `email`, `access_token`, `cookies` and optionally `csrf_token`) from the browser, save it to a file or paste it into the prompt, and the app saves it to the session file.
+3. Falls back to manual import if automatic capture cannot run: you export session JSON (fields `email`, `cookies`, and either `token` or `access_token`; optionally `csrf_token`) from the browser, save it to a file or paste it into the prompt, and the app saves it to the session file.
 
 Required session JSON fields: `email`, `cookies` (array) and either `token` (current web UI) or `access_token` (older sessions). Optional: `csrf_token`.
 
@@ -123,10 +184,9 @@ If the tool exits with code `2` during normal operation, the session is no longe
 ## Typical workflows
 
 ### First export of a mailbox
-1. Run `-init-session` and sign in manually in the browser.
-2. Import the session JSON when prompted.
-3. Let the app list folders and select the ones you need.
-4. Start the export; rerun the same command later to resume.
+1. Run `-init-session` and sign in in the browser that opens; the app captures the session automatically (manual session JSON import is the fallback).
+2. Let the app list folders and select the ones you need.
+3. Start the export; rerun the same command later to resume.
 
 ### Resume after interruption
 - Re-run the export with the same session/config/output paths.
