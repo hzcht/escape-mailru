@@ -484,7 +484,9 @@ func journalExists(accountDir string) bool {
 	return false
 }
 
-// bootstrapSession guides manual login and saves a session file.
+// bootstrapSession captures the session from a debuggable browser and saves it.
+// When the browser cannot be driven automatically it falls back to the manual
+// JSON import, so -init-session keeps working without Chrome.
 func bootstrapSession(fl cliFlags) error {
 	if !fl.force {
 		if _, err := os.Stat(fl.sessionPath); err == nil {
@@ -493,6 +495,29 @@ func bootstrapSession(fl cliFlags) error {
 	}
 	fmt.Fprintln(os.Stderr, "Session setup (mode 0)")
 	fmt.Fprintf(os.Stderr, "Target session file: %s\n", fl.sessionPath)
+
+	r := bufio.NewReader(os.Stdin)
+	s, err := captureSession(fl, r, os.Stderr)
+	if err != nil {
+		if !errors.Is(err, errCaptureUnavailable) {
+			return err
+		}
+		logf("automatic capture unavailable: %v", err)
+		s, err = manualSession(fl, r)
+		if err != nil {
+			return err
+		}
+	}
+	if err := session.Save(fl.sessionPath, s); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Session saved: %s (account: %s)\n", fl.sessionPath, s.Email)
+	return nil
+}
+
+// manualSession opens the login page in the default browser and walks the user
+// through importing a session JSON document from a file or pasted input.
+func manualSession(fl cliFlags, r *bufio.Reader) (session.Session, error) {
 	if fl.loginURL != "" {
 		fmt.Fprintf(os.Stderr, "Opening browser: %s\n", fl.loginURL)
 		if err := openBrowser(fl.loginURL); err != nil {
@@ -505,16 +530,7 @@ func bootstrapSession(fl cliFlags) error {
 	fmt.Fprintln(os.Stderr, "2. Export session data as JSON with fields: email, access_token, cookies (and csrf_token if available).")
 	fmt.Fprintln(os.Stderr, "3. Save that JSON to a file, or paste it below.")
 	fmt.Fprintln(os.Stderr)
-
-	s, err := promptSession(os.Stdin, os.Stderr)
-	if err != nil {
-		return err
-	}
-	if err := session.Save(fl.sessionPath, s); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stderr, "Session saved: %s (account: %s)\n", fl.sessionPath, s.Email)
-	return nil
+	return promptSession(r, os.Stderr)
 }
 
 // promptSession reads session JSON from a file path or pasted stdin.

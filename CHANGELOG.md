@@ -4,6 +4,7 @@
 
 ### Added
 - Session bootstrap mode (`-init-session`, mode 0): open browser for manual sign-in, import session JSON, save session file, and continue. Existing session files require `-force`.
+- Automatic session capture through a debuggable Chrome/Edge window during `-init-session`: the app reads `access_token`, e-mail, CSRF token and cookies from the browser's own traffic and falls back to manual JSON import when the browser cannot be driven.
 - Offline integrity check (`-verify`, `-verify-hash`) comparing journal records with files, including optional SHA-256.
 - Machine-readable output (`-json`) for folder lists, export summaries, and verify reports.
 - Exact `-limit` semantics: the run attempts at most N messages.

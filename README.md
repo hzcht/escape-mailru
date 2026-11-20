@@ -102,9 +102,8 @@ If you do not have a session file yet, run:
 
 This mode:
 1. Refuses to overwrite an existing session file unless `-force` is passed.
-2. Opens the login page in your default browser (or prints the URL if automatic open fails).
-3. Lets you sign in manually in the browser.
-4. Prompts you to import session data as JSON (from a file path or pasted input) and saves it to the session file.
+2. Tries to capture the session automatically: it opens the login page in a debuggable Chrome/Edge window, you sign in manually, and the app reads `access_token`, e-mail, CSRF token and cookies from the browser's traffic.
+3. Falls back to manual import if automatic capture cannot run: you export session JSON (fields `email`, `access_token`, `cookies` and optionally `csrf_token`) from the browser, save it to a file or paste it into the prompt, and the app saves it to the session file.
 
 Required session JSON fields: `email`, `access_token`, `cookies` (array). Optional: `csrf_token`.
 

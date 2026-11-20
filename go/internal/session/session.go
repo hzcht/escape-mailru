@@ -111,7 +111,7 @@ func (s Session) CookieHeader(now time.Time) string {
 	unix := float64(now.Unix())
 	parts := make([]string, 0, len(s.Cookies))
 	for _, c := range s.Cookies {
-		if !mailDomain(c.Domain) {
+		if !AcceptsDomain(c.Domain) {
 			continue
 		}
 		if c.Expires > 0 && c.Expires < unix {
@@ -137,8 +137,10 @@ func ExpiryWarning(s Session, now time.Time) string {
 	return fmt.Sprintf("%d cookie(s) expire within 7 days: %s", len(names), strings.Join(names, ", "))
 }
 
-// mailDomain reports whether the cookie belongs to a supported mail/VK host.
-func mailDomain(domain string) bool {
+// AcceptsDomain reports whether a cookie from domain is forwarded to the mail
+// API. It is the single allow-list used when reading a session file and when
+// capturing cookies straight from the browser.
+func AcceptsDomain(domain string) bool {
 	d := strings.ToLower(strings.TrimPrefix(domain, "."))
 	if d == "" {
 		return true // Host-only cookie from a browser export.

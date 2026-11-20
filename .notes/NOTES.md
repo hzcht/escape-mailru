@@ -8,3 +8,4 @@
 - New tests cover mailapi retries, CLI verify/lock/partial/JSON/integration, session VK/expiry/save errors, journal read-only/verify limits, exporter partial summary, and TUI resize.
 - P3 done: `.github/workflows/ci.yml` (gofmt, vet, build, test, `-race`, fuzz smoke) and fuzz targets in `layout`/`session`. Coverage total 81.7%; every package ≥80% except `cmd/mexporter` (66.8% wiring).
 - Final verification green: `gofmt -l .`, `go vet ./...`, `go test ./... -count=1`, `go build -o mexporter.exe ./cmd/mexporter`. Not committed yet — waiting for an explicit request.
+- `-init-session` now captures the session automatically from a debuggable Chrome/Edge window (DevTools traffic: access_token/e-mail/CSRF/cookies) with manual JSON import fallback via `errCaptureUnavailable`; added `internal/cdp` and `cmd/mexporter/capture` tests; docs updated in README/CHANGELOG. Verification green.
