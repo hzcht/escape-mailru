@@ -6,7 +6,7 @@ mail-export-test/
 /AGENTS.md
 
 # Session data — contains cookies and access_token (secrets)
-session/
+/session/
 mexporter.exe
 mexporter.json
 mexporter-*.json
@@ -31,3 +31,6 @@ scripts/migrate_to_imap.cpython-*.pyc
 # Local coverage artifacts
 cover.out
 cover.txt
+
+# Release archives built by scripts/package-release.ps1
+dist/
