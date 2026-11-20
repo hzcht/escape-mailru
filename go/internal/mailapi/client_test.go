@@ -7,9 +7,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func TestMain(m *testing.M) {
+	old := retryFirstBackoff
+	retryFirstBackoff = time.Millisecond
+	code := m.Run()
+	retryFirstBackoff = old
+	os.Exit(code)
+}
 
 func testServer(t *testing.T, handler http.HandlerFunc) *Client {
 	t.Helper()
@@ -206,6 +217,75 @@ func TestHTTPStatusClassification(t *testing.T) {
 		if !errors.As(err, &apiErr) || apiErr.Status != tt.code {
 			t.Fatalf("%d: err = %v", tt.code, err)
 		}
+	}
+}
+
+func TestRetryTransientHTTP(t *testing.T) {
+	var attempts atomic.Int32
+	client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"ok","body":{"folders":[{"id":0,"name":"Inbox"}]}}`))
+	})
+	folders, err := client.Folders(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folders) != 1 || attempts.Load() != 3 {
+		t.Fatalf("folders=%+v attempts=%d", folders, attempts.Load())
+	}
+}
+
+func TestRetryRateLimitHeader(t *testing.T) {
+	var attempts atomic.Int32
+	client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"ok","body":{"folders":[{"id":0,"name":"Inbox"}]}}`))
+	})
+	if _, err := client.Folders(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts = %d", attempts.Load())
+	}
+}
+
+func TestRetryAfterParsing(t *testing.T) {
+	seconds := &http.Response{Header: http.Header{"Retry-After": {"7"}}}
+	if got := retryAfter(seconds); got != 7*time.Second {
+		t.Fatalf("seconds = %s", got)
+	}
+	when := time.Now().Add(30 * time.Second).UTC().Format(http.TimeFormat)
+	date := &http.Response{Header: http.Header{"Retry-After": {when}}}
+	if got := retryAfter(date); got < 25*time.Second || got > 31*time.Second {
+		t.Fatalf("date = %s", got)
+	}
+	empty := &http.Response{Header: http.Header{}}
+	if got := retryAfter(empty); got != 0 {
+		t.Fatalf("empty = %s", got)
+	}
+}
+
+func TestNoRetryPermanent4xx(t *testing.T) {
+	var attempts atomic.Int32
+	client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("missing"))
+	})
+	_, err := client.Folders(context.Background())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound || !strings.Contains(apiErr.Body, "missing") {
+		t.Fatalf("err = %v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d", attempts.Load())
 	}
 }
 

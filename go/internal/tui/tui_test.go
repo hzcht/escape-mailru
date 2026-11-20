@@ -138,6 +138,23 @@ func TestApplyLine(t *testing.T) {
 	}
 }
 
+func TestModelResize(t *testing.T) {
+	m := newModel(nodes(), nil, 2, 40)
+	m.resize(1, 1)
+	if m.height != 10 || m.width != 100 {
+		t.Fatalf("clamped defaults = %d x %d", m.height, m.width)
+	}
+	m.resize(8, 60)
+	if m.height != 8 || m.width != 60 {
+		t.Fatalf("resize = %d x %d", m.height, m.width)
+	}
+	m.handle(keyEnd)
+	m.resize(2, 40)
+	if m.cursor != 2 || m.offset < 0 || m.offset > 2 {
+		t.Fatalf("cursor=%d offset=%d after shrink", m.cursor, m.offset)
+	}
+}
+
 func TestEmptyModel(t *testing.T) {
 	m := newModel(nil, nil, 0, 0)
 	if m.height != 10 || m.width != 100 {

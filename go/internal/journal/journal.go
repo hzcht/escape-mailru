@@ -7,11 +7,15 @@ package journal
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -43,6 +47,7 @@ type Entry struct {
 	Status    string `json:"status"`
 	Error     string `json:"error,omitempty"`
 	Size      int64  `json:"size,omitempty"`
+	SHA256    string `json:"sha256,omitempty"`
 	UpdatedAt string `json:"updated_at"`
 }
 
@@ -95,14 +100,40 @@ func Open(dir, email string) (*Journal, error) {
 	return j, nil
 }
 
-// load prefers JSONL because it is the crash-safe source of truth.
-func (j *Journal) load() error {
-	jsonlPath := filepath.Join(j.dir, jsonlName)
-	if f, err := os.Open(jsonlPath); err == nil {
-		// NOERR: read-only close.
-		defer f.Close()
-		return j.scan(f)
+// OpenReadOnly loads the journal without creating or modifying files.
+func OpenReadOnly(dir, email string) (*Journal, error) {
+	j := &Journal{dir: dir, email: email, started: time.Now(), entries: map[string]*Entry{}}
+	if err := j.load(); err != nil {
+		return nil, err
 	}
+	return j, nil
+}
+
+// load restores the snapshot first, then replays JSONL over it. JSONL is the
+// crash-safe source of truth, but an empty or truncated JSONL must not erase
+// entries that are already in the snapshot.
+func (j *Journal) load() error {
+	snapErr := j.loadSnapshot()
+	f, err := os.Open(filepath.Join(j.dir, jsonlName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return snapErr
+		}
+		return fmt.Errorf("REQ-EXPORT-003: open jsonl: %w", err)
+	}
+	defer f.Close() // NOERR: read-only close.
+	n, err := j.scan(f)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// A snapshot error is fatal only when JSONL has nothing to replay.
+		return snapErr
+	}
+	return nil
+}
+
+func (j *Journal) loadSnapshot() error {
 	raw, err := os.ReadFile(filepath.Join(j.dir, snapshotName))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -123,10 +154,12 @@ func (j *Journal) load() error {
 	return nil
 }
 
-// scan reads the append-only log into the index.
-func (j *Journal) scan(f *os.File) error {
+// scan reads the append-only log into the index and returns the number of
+// valid entries it saw.
+func (j *Journal) scan(f *os.File) (int, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, flushSize), 4*1024*1024)
+	n := 0
 	for sc.Scan() {
 		if len(sc.Bytes()) == 0 {
 			continue
@@ -135,12 +168,13 @@ func (j *Journal) scan(f *os.File) error {
 		if json.Unmarshal(sc.Bytes(), &e) == nil && e.MessageID != "" {
 			cp := e
 			j.entries[e.MessageID] = &cp
+			n++
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return fmt.Errorf("REQ-EXPORT-003: scan jsonl: %w", err)
+		return n, fmt.Errorf("REQ-EXPORT-003: scan jsonl: %w", err)
 	}
-	return nil
+	return n, nil
 }
 
 // Status returns the stored entry for a message.
@@ -196,6 +230,12 @@ func (j *Journal) saveLocked(ctx context.Context) error {
 	}
 	for _, e := range j.entries {
 		snap.Entries = append(snap.Entries, *e)
+	}
+	sort.Slice(snap.Entries, func(a, b int) bool {
+		return snap.Entries[a].MessageID < snap.Entries[b].MessageID
+	})
+	for i := range snap.Entries {
+		e := &snap.Entries[i]
 		switch e.Status {
 		case StatusDownloaded:
 			snap.Stats.Downloaded++
@@ -249,9 +289,147 @@ func (j *Journal) Stats() Stats {
 	return s
 }
 
+// Entries returns a deterministic copy of the in-memory index.
+func (j *Journal) Entries() []Entry {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	out := make([]Entry, 0, len(j.entries))
+	for _, e := range j.entries {
+		out = append(out, *e)
+	}
+	sort.Slice(out, func(a, b int) bool {
+		return out[a].MessageID < out[b].MessageID
+	})
+	return out
+}
+
+// VerifyIssue describes one downloaded entry that does not match its file.
+type VerifyIssue struct {
+	MessageID string
+	Dest      string
+	Kind      string
+	Detail    string
+}
+
+// VerifyReport summarizes an offline check of downloaded journal entries.
+type VerifyReport struct {
+	Total        int
+	OK           int
+	Missing      int
+	SizeMismatch int
+	HashMismatch int
+	NoHash       int
+	Unsafe       int
+	Unreadable   int
+	Issues       []VerifyIssue
+	Truncated    bool
+}
+
+const verifyIssueLimit = 100
+
+// Verify checks downloaded entries against files below accountDir. With full
+// set, it also compares SHA-256 for entries written by newer versions.
+func (j *Journal) Verify(accountDir string, full bool) (VerifyReport, error) {
+	abs, err := filepath.Abs(accountDir)
+	if err != nil {
+		return VerifyReport{}, fmt.Errorf("REQ-EXPORT-003: resolve account dir: %w", err)
+	}
+	var rep VerifyReport
+	for _, e := range j.Entries() {
+		if e.Status != StatusDownloaded {
+			continue
+		}
+		rep.Total++
+		bad := false
+		addIssue := func(kind, detail string) {
+			if len(rep.Issues) >= verifyIssueLimit {
+				rep.Truncated = true
+				return
+			}
+			rep.Issues = append(rep.Issues, VerifyIssue{
+				MessageID: e.MessageID,
+				Dest:      e.Dest,
+				Kind:      kind,
+				Detail:    detail,
+			})
+		}
+		dest := strings.TrimSpace(e.Dest)
+		if dest == "" {
+			rep.Missing++
+			addIssue("missing-path", "")
+			continue
+		}
+		clean := filepath.Clean(filepath.FromSlash(dest))
+		if filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" ||
+			clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+			rep.Unsafe++
+			addIssue("unsafe-path", dest)
+			continue
+		}
+		path := filepath.Join(abs, clean)
+		rel, relErr := filepath.Rel(abs, path)
+		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			rep.Unsafe++
+			addIssue("unsafe-path", dest)
+			continue
+		}
+		st, statErr := os.Stat(path)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				rep.Missing++
+			} else {
+				rep.Unreadable++
+			}
+			addIssue("stat", statErr.Error())
+			continue
+		}
+		if st.IsDir() {
+			rep.Unreadable++
+			addIssue("not-file", dest)
+			continue
+		}
+		if e.Size > 0 && st.Size() != e.Size {
+			bad = true
+			rep.SizeMismatch++
+			addIssue("size", fmt.Sprintf("file=%d journal=%d", st.Size(), e.Size))
+		} else if e.Size == 0 && st.Size() == 0 {
+			bad = true
+			rep.SizeMismatch++
+			addIssue("empty", "")
+		}
+		if full {
+			if e.SHA256 == "" {
+				rep.NoHash++
+			} else {
+				raw, readErr := os.ReadFile(path)
+				if readErr != nil {
+					bad = true
+					rep.Unreadable++
+					addIssue("read", readErr.Error())
+				} else {
+					sum := sha256.Sum256(raw)
+					got := hex.EncodeToString(sum[:])
+					if !strings.EqualFold(got, e.SHA256) {
+						bad = true
+						rep.HashMismatch++
+						addIssue("hash", fmt.Sprintf("file=%s journal=%s", got, e.SHA256))
+					}
+				}
+			}
+		}
+		if !bad {
+			rep.OK++
+		}
+	}
+	return rep, nil
+}
+
 // Close writes the final snapshot, then flushes and closes the log.
 // It always releases the file even when the snapshot fails.
 func (j *Journal) Close() error {
+	if j.jsonl == nil {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 	defer cancel()
 	var errs []error

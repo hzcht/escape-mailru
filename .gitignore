@@ -26,3 +26,7 @@ run_*
 __pycache__/
 *.pyc
 scripts/migrate_to_imap.cpython-*.pyc
+
+# Local coverage artifacts
+cover.out
+cover.txt

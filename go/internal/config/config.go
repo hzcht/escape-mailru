@@ -92,6 +92,9 @@ func Save(path string, c Config, now time.Time) error {
 		return fmt.Errorf("REQ-EXPORT-006: encode config: %w", err)
 	}
 	raw = append(raw, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("REQ-EXPORT-006: create config dir: %w", err)
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".mexporter-*.tmp")
 	if err != nil {
 		return fmt.Errorf("REQ-EXPORT-006: create config temp: %w", err)

@@ -103,3 +103,29 @@ func TestSafeFilename(t *testing.T) {
 		t.Fatalf("uidl suffix lost: %q", name)
 	}
 }
+
+func TestSafeFilenameKeepsUniqueLongUIDL(t *testing.T) {
+	ts := time.Date(2024, time.March, 5, 12, 0, 0, 0, time.Local).Unix()
+	base := strings.Repeat("a", 200)
+	first := SafeFilename(ts, "subject", base+"1")
+	second := SafeFilename(ts, "subject", base+"2")
+	if first == second {
+		t.Fatalf("long uids collide: %q", first)
+	}
+	if !strings.HasSuffix(first, ".eml") || !strings.HasSuffix(second, ".eml") {
+		t.Fatalf("missing .eml suffix: %q %q", first, second)
+	}
+	if strings.ContainsAny(first, `/\:*?"<>|`) {
+		t.Fatalf("unsafe filename: %q", first)
+	}
+}
+
+func TestSafeFilenameSanitizesUnsafeUIDL(t *testing.T) {
+	got := SafeFilename(0, "", `../a\b:c`)
+	if strings.ContainsAny(got, `/\:`) {
+		t.Fatalf("unsafe uidl survived: %q", got)
+	}
+	if got == SafeFilename(0, "", "a_b_c") {
+		t.Fatalf("unsafe uidl must keep an identity hash: %q", got)
+	}
+}

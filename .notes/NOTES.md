@@ -3,3 +3,8 @@
 - Key behaviors: ascending enumeration, uidl-based identity, read-only API usage, JSONL journal with snapshot, retries/backoff, and atomic file writes.
 - Legacy source snapshots are stored under `.notes/backup/`.
 - Project documentation was rewritten and example commands/configs were anonymized.
+- Baseline verified: `gofmt -l .` clean, `go vet ./...` clean, `go test ./...` green.
+- Roadmap implementation checkpoint: P0 correctness (thread failure reporting, safe filenames, partial exit, journal recovery, folder-ID validation, cancellation, size-aware resume), P1 streaming/resume/ReadDir and mailapi retry ownership, P2 verify/JSON/session/lock, docs, and TUI polish are implemented; mailapi owns transport retries, exporter retries only invalid-EML responses.
+- New tests cover mailapi retries, CLI verify/lock/partial/JSON/integration, session VK/expiry/save errors, journal read-only/verify limits, exporter partial summary, and TUI resize.
+- P3 done: `.github/workflows/ci.yml` (gofmt, vet, build, test, `-race`, fuzz smoke) and fuzz targets in `layout`/`session`. Coverage total 81.7%; every package ≥80% except `cmd/mexporter` (66.8% wiring).
+- Final verification green: `gofmt -l .`, `go vet ./...`, `go test ./... -count=1`, `go build -o mexporter.exe ./cmd/mexporter`. Not committed yet — waiting for an explicit request.

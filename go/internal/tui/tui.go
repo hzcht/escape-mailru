@@ -181,6 +181,18 @@ func (m *model) move(delta int) {
 	m.clamp()
 }
 
+// resize updates the viewport after a terminal resize.
+func (m *model) resize(height, width int) {
+	if height < 5 {
+		height = 10
+	}
+	if width < 40 {
+		width = 100
+	}
+	m.height, m.width = height, width
+	m.clamp()
+}
+
 // clamp bounds the cursor and scroll offset.
 func (m *model) clamp() {
 	if m.cursor < 0 {
@@ -247,9 +259,11 @@ func run(nodes []*layout.Node, preselected []string, account string, open func()
 	}()
 	height, width := term.Size()
 	m := newModel(nodes, preselected, height-6, width)
-	fmt.Print("\x1b[?25l")
-	defer fmt.Print("\x1b[?25h\n")
+	fmt.Print("\x1b[?1049h\x1b[?25l")
+	defer fmt.Print("\x1b[?25h\x1b[?1049l\n")
 	for {
+		height, width := term.Size()
+		m.resize(height-6, width)
 		fmt.Print("\x1b[H\x1b[2J", m.view(account))
 		k, err := term.ReadKey()
 		if err != nil {

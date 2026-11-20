@@ -59,6 +59,8 @@ func Validate(s Session) error {
 		return fmt.Errorf("REQ-EXPORT-010: session access_token is empty")
 	case len(s.Cookies) == 0:
 		return fmt.Errorf("REQ-EXPORT-010: session cookies are empty")
+	case s.CookieHeader(time.Now()) == "":
+		return fmt.Errorf("REQ-EXPORT-010: session has no usable, unexpired cookies")
 	}
 	return nil
 }
@@ -120,8 +122,31 @@ func (s Session) CookieHeader(now time.Time) string {
 	return strings.Join(parts, "; ")
 }
 
-// mailDomain reports whether the cookie belongs to mail.ru or a subdomain.
+// ExpiryWarning reports cookies that expire soon without exposing values.
+func ExpiryWarning(s Session, now time.Time) string {
+	deadline := now.Add(7 * 24 * time.Hour).Unix()
+	names := make([]string, 0, 4)
+	for _, c := range s.Cookies {
+		if c.Expires > 0 && int64(c.Expires) <= deadline {
+			names = append(names, c.Name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d cookie(s) expire within 7 days: %s", len(names), strings.Join(names, ", "))
+}
+
+// mailDomain reports whether the cookie belongs to a supported mail/VK host.
 func mailDomain(domain string) bool {
 	d := strings.ToLower(strings.TrimPrefix(domain, "."))
-	return d == "mail.ru" || strings.HasSuffix(d, ".mail.ru")
+	if d == "" {
+		return true // Host-only cookie from a browser export.
+	}
+	for _, base := range []string{"mail.ru", "vk.com", "vk.ru", "userapi.com"} {
+		if d == base || strings.HasSuffix(d, "."+base) {
+			return true
+		}
+	}
+	return false
 }

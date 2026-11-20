@@ -160,7 +160,7 @@ func TestMultiThreadExpansionAndFallback(t *testing.T) {
 		},
 	}
 	f.threads["2:abc:0"] = []mailapi.Message{{ID: "m1"}, {ID: "m2"}}
-	f.threadErr["2:def:0"] = errors.New("boom")
+	f.threadErr["2:def:0"] = &mailapi.APIError{Status: 400}
 	f.data["m1"] = []byte(validEml)
 	f.data["m2"] = []byte(validEml)
 	f.data["m4"] = []byte(validEml)
@@ -169,7 +169,7 @@ func TestMultiThreadExpansionAndFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sum.Found != 3 || sum.Downloaded != 3 {
+	if sum.Found != 2 || sum.Downloaded != 2 || sum.ThreadsFailed != 1 || !sum.Partial {
 		t.Fatalf("summary = %+v", sum)
 	}
 }
@@ -219,14 +219,14 @@ func TestFolderListErrorContinues(t *testing.T) {
 	}
 	defer j.Close()
 	f := twoMessages()
-	f.listErr["1"] = errors.New("boom")
+	f.listErr["1"] = &mailapi.APIError{Status: 400}
 	s := New(f, j, Options{AccountDir: account, Workers: 1, PageSize: 2, DryRun: true})
 	nodes := []*layout.Node{node("1", "Broken", 1), node("0", "Inbox", 2)}
 	sum, err := s.Run(context.Background(), nodes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sum.Found != 2 {
+	if sum.Found != 2 || sum.FailedFolders != 1 || !sum.Partial {
 		t.Fatalf("summary = %+v", sum)
 	}
 }
@@ -301,6 +301,13 @@ func TestLogf(t *testing.T) {
 	}
 }
 
+func TestSummaryPartialFromFolder(t *testing.T) {
+	s := New(newFake(), nil, Options{})
+	if sum := s.summary([]FolderSummary{{Partial: true}}); !sum.Partial {
+		t.Fatalf("truncated folder must mark the run partial: %+v", sum)
+	}
+}
+
 func TestRecordFailureThroughRun(t *testing.T) {
 	account := t.TempDir()
 	j, err := journal.Open(filepath.Join(account, "journal"), "x")
@@ -324,14 +331,12 @@ func TestRecordFailureThroughRun(t *testing.T) {
 	}
 }
 
-func TestFetchRateLimitedHonoursContext(t *testing.T) {
+func TestFetchReturnsRateLimit(t *testing.T) {
 	f := newFake()
 	f.downloadErr["m1"] = mailapi.ErrRateLimited
 	s := New(f, nil, Options{})
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
-	defer cancel()
-	_, err := s.fetch(ctx, job{messageID: "m1"})
-	if !errors.Is(err, context.DeadlineExceeded) {
+	_, err := s.fetch(context.Background(), job{messageID: "m1"})
+	if !errors.Is(err, mailapi.ErrRateLimited) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -340,9 +345,9 @@ func TestDownloadJobWriteError(t *testing.T) {
 	f := newFake()
 	f.data["m1"] = []byte(validEml)
 	s := New(f, nil, Options{AccountDir: t.TempDir()})
-	rel, size, err := s.downloadJob(context.Background(), job{messageID: "m1", folderPath: "missing"})
-	if err == nil || size != 0 || rel != "missing/no-date_m1.eml" {
-		t.Fatalf("rel=%q size=%d err=%v", rel, size, err)
+	rel, size, sum, err := s.downloadJob(context.Background(), job{messageID: "m1", folderPath: "missing"})
+	if err == nil || size != 0 || sum != "" || rel != "missing/no-date_m1.eml" {
+		t.Fatalf("rel=%q size=%d sum=%q err=%v", rel, size, sum, err)
 	}
 }
 

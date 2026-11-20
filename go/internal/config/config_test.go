@@ -81,9 +81,22 @@ func TestSaveToDirectoryFails(t *testing.T) {
 	}
 }
 
+func TestSaveCreatesDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "config.json")
+	if err := Save(path, Default(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSaveBadDirectory(t *testing.T) {
-	err := Save(filepath.Join(t.TempDir(), "missing", "config.json"), Default(), time.Now())
-	if err == nil {
-		t.Fatal("expected create temp error")
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(filepath.Join(blocker, "config.json"), Default(), time.Now()); err == nil {
+		t.Fatal("expected directory error")
 	}
 }

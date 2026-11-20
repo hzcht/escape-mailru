@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -72,6 +73,49 @@ func TestCookieHeader(t *testing.T) {
 	}
 }
 
+func TestCookieHeaderVKDomains(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	s := Session{Cookies: []Cookie{
+		{Name: "mail", Value: "m", Domain: ".mail.ru"},
+		{Name: "vk", Value: "v", Domain: ".vk.com"},
+		{Name: "workspace", Value: "w", Domain: "workspace.vk.ru"},
+		{Name: "userapi", Value: "u", Domain: ".userapi.com"},
+		{Name: "evil", Value: "x", Domain: "vk.com.evil.example"},
+	}}
+	got := s.CookieHeader(now)
+	want := "mail=m; vk=v; workspace=w; userapi=u"
+	if got != want {
+		t.Fatalf("cookie header = %q, want %q", got, want)
+	}
+}
+
+func TestValidateRequiresUsableCookies(t *testing.T) {
+	now := time.Now()
+	s := Session{
+		Email:       "user@mail_ru_hosted_domain",
+		AccessToken: "t",
+		Cookies: []Cookie{
+			{Name: "s", Value: "1", Domain: ".mail.ru", Expires: float64(now.Add(-time.Hour).Unix())},
+		},
+	}
+	if err := Validate(s); err == nil {
+		t.Fatal("expired cookie must fail validation")
+	}
+}
+
+func TestExpiryWarning(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	s := Session{Cookies: []Cookie{
+		{Name: "soon", Value: "x", Domain: ".mail.ru", Expires: float64(now.Add(48 * time.Hour).Unix())},
+		{Name: "later", Value: "y", Domain: ".mail.ru", Expires: float64(now.Add(30 * 24 * time.Hour).Unix())},
+		{Name: "session", Value: "z", Domain: ".mail.ru"},
+	}}
+	warning := ExpiryWarning(s, now)
+	if !strings.Contains(warning, "soon") || strings.Contains(warning, "later") || strings.Contains(warning, "session") {
+		t.Fatalf("warning = %q", warning)
+	}
+}
+
 func TestValidate(t *testing.T) {
 	if err := Validate(Session{}); err == nil {
 		t.Fatal("expected error for empty session")
@@ -81,9 +125,18 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func validSession() Session {
+	return Session{
+		Email:       "user@example.com",
+		AccessToken: "t",
+		CSRFToken:   "c",
+		Cookies:     []Cookie{{Name: "s", Value: "1", Domain: ".mail.ru"}},
+	}
+}
+
 func TestSaveAndLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "session.json")
-	in := Session{Email: "user@example.com", AccessToken: "t", CSRFToken: "c", Cookies: []Cookie{{Name: "s", Value: "1", Domain: ".mail.ru"}}}
+	in := validSession()
 	if err := Save(path, in); err != nil {
 		t.Fatal(err)
 	}
@@ -93,5 +146,60 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 	if out.Email != in.Email || out.AccessToken != in.AccessToken || out.CSRFToken != in.CSRFToken || len(out.Cookies) != 1 {
 		t.Fatalf("loaded = %+v", out)
+	}
+}
+
+func TestSaveRejectsInvalidSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	if err := Save(path, Session{}); err == nil {
+		t.Fatal("expected validation error")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("invalid session was written: %v", err)
+	}
+}
+
+func TestSaveBadParent(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The parent of the target is a regular file, so MkdirAll must fail.
+	if err := Save(filepath.Join(blocker, "session.json"), validSession()); err == nil {
+		t.Fatal("expected directory creation error")
+	}
+}
+
+func TestSaveReplacesExisting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.json")
+	first := validSession()
+	first.Cookies[0].Value = "old"
+	if err := Save(path, first); err != nil {
+		t.Fatal(err)
+	}
+	second := validSession()
+	second.Cookies[0].Value = "new"
+	if err := Save(path, second); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Cookies[0].Value != "new" {
+		t.Fatalf("cookie = %q, want new", out.Cookies[0].Value)
+	}
+}
+
+func TestSaveRenameError(t *testing.T) {
+	dir := t.TempDir()
+	// The destination is an existing directory, so the final rename fails.
+	dst := filepath.Join(dir, "session.json")
+	if err := os.MkdirAll(filepath.Join(dst, "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(dst, validSession()); err == nil {
+		t.Fatal("expected rename error")
 	}
 }

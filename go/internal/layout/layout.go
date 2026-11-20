@@ -2,6 +2,8 @@
 package layout
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -174,6 +176,8 @@ func Flatten(roots []*Node) []*Node {
 // SafeFilename builds a readable, unique .eml name.
 //
 // REQ-EXPORT-005: format is YYYY-MM-DD_<subject>_<uidl>.eml.
+// The uidl is the message identity: it is sanitized and hashed instead of being
+// truncated, so two long or unsafe uids cannot collapse into one filename.
 func SafeFilename(dateUnix int64, subject, uidl string) string {
 	date := "no-date"
 	if dateUnix > 0 {
@@ -187,10 +191,25 @@ func SafeFilename(dateUnix int64, subject, uidl string) string {
 	if subj != "" {
 		name += "_" + subj
 	}
-	name += "_" + uidl
-	runes := []rune(name)
-	if len(runes) > 120 {
-		name = string(runes[:120])
-	}
+	name += "_" + filenameUIDL(uidl)
 	return name + ".eml"
+}
+
+// filenameUIDL keeps safe short uids readable and replaces unsafe or long ones
+// with a sanitized prefix plus a stable hash of the original value.
+func filenameUIDL(uidl string) string {
+	safe := SanitizeName(uidl, 0)
+	runes := []rune(safe)
+	if safe != "" && safe == uidl && len(runes) <= 80 {
+		return safe
+	}
+	sum := sha256.Sum256([]byte(uidl))
+	hash := hex.EncodeToString(sum[:8])
+	if safe == "" || safe == "_" {
+		return hash
+	}
+	if len(runes) > 24 {
+		safe = string(runes[:24])
+	}
+	return safe + "_" + hash
 }

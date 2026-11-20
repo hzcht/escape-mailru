@@ -45,26 +45,37 @@ docs/                 Project documentation
 ### Mail API client
 - Performs read-only requests for folder and message/thread data.
 - Downloads message content without mutating mailbox state.
+- Owns transport retries: exponential backoff, `Retry-After` handling, and no retry for permanent 4xx responses.
+- Captures bounded error bodies for diagnostics and tunes the HTTP transport for multiple workers.
 
 ### Layout
 - Builds a local folder structure mirroring mailbox hierarchy.
 - Produces stable, filesystem-safe filenames using message identity and metadata.
+- Never truncates the identity portion; long or unsafe identities get a deterministic hash suffix.
 
 ### Config and selection
 - Loads runtime configuration and defaults.
 - Supports interactive folder selection and non-interactive modes.
 - Persists selected folders/settings when required by CLI behavior.
+- Validates configured/selected folder IDs against the live folder tree.
 
 ### Journal
 - `export-log.jsonl`: append-only event/state log (source of truth).
 - `export-log.json`: snapshot for fast status reads.
-- Supports resume by distinguishing completed, skipped, and failed work.
+- Snapshot is loaded first, then JSONL is replayed; an empty or corrupt JSONL does not erase a valid snapshot.
+- Supports resume by distinguishing completed, skipped, and failed work; recorded size is compared with the file.
+- Optional SHA-256 fields enable offline integrity verification (`-verify-hash`).
 
 ### Exporter
-- Enumerates messages in ascending date order.
+- Enumerates messages in ascending date order and streams them into the worker pool.
 - Uses a worker pool for downloads with bounded concurrency.
-- Retries transient failures and records outcomes in the journal.
+- Retries transient failures at the API client level and records outcomes in the journal.
 - Writes files safely and validates downloaded artifacts before marking complete.
+- Reports failed folders/threads and truncation as a partial run.
+
+### CLI
+- Maps errors to documented exit codes (`0`, `1`, `2`, `130`).
+- Provides offline verification, JSON summaries, a per-account export lock, and `-allow-partial`.
 
 ## Invariants
 
@@ -72,7 +83,7 @@ docs/                 Project documentation
 - Message identity is provider uidl.
 - Only read operations are permitted against the mailbox.
 - Journal/download completion must reflect actual, valid local files.
-- A single output target must not be written by concurrent exporter processes.
+- A single account output target must not be written by concurrent exporter processes; the CLI enforces this with a lock file.
 
 ## Testing and verification
 
@@ -85,3 +96,9 @@ go test ./...
 ```
 
 Targeted tests can be used during development for specific packages or scenarios.
+
+Fuzz targets cover the two places where untrusted strings become file-system
+paths or credentials: `layout.SanitizeName`/`SafeFilename` (unsafe characters,
+reserved device names, identity preservation) and session JSON parsing plus the
+cookie domain allow-list. Seeds run as ordinary tests; `.github/workflows/ci.yml`
+runs gofmt, vet, build, tests, `-race`, and a short fuzz pass on every push.

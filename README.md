@@ -10,6 +10,9 @@
 - Dry-run enumeration mode
 - Parallel downloads with configurable workers and delay
 - Append-only journal and snapshot for resume/retry safety
+- Offline integrity check (`-verify`, optional SHA-256 with `-verify-hash`)
+- Machine-readable summaries (`-json`)
+- Single-instance lock per account output directory
 - Deterministic local file layout per account/folder
 
 ## Requirements
@@ -51,8 +54,14 @@ Run commands from the project root.
 # Export specific folders
 .\go\mexporter.exe -folders 0,1
 
-# Use custom paths
-.\go\mexporter.exe -session <session-file> -config <config-file> -out <output-dir>
+# Check existing files against the journal (add -verify-hash for SHA-256)
+.\go\mexporter.exe -verify -json
+
+# Accept a run where some folders or threads failed
+.\go\mexporter.exe -no-tui -allow-partial
+
+# Use custom paths or API base
+.\go\mexporter.exe -session <session-file> -config <config-file> -out <output-dir> -base-url <api-base>
 ```
 
 ### Common flags
@@ -61,16 +70,22 @@ Run commands from the project root.
 | --- | --- |
 | `-init-session` | Guided session setup: open browser for manual sign-in, then import and save session data |
 | `-login-url` | URL to open during `-init-session` (default: `https://e.mail.ru/`) |
+| `-force` | Replace an existing session (`-init-session`) or remove a stale/active export lock |
 | `-list` | Print folder tree and exit |
 | `-folders` | Comma-separated folder IDs to export |
 | `-dry-run` | Enumerate only, do not download message files |
-| `-limit` | Limit number of threads to process |
+| `-limit` | Cap the number of messages attempted in this run (0 = no limit) |
 | `-workers` | Number of download workers |
-| `-delay` | Delay between requests (ms), subject to config behavior |
+| `-delay` | Pause per worker as a Go duration (for example `250ms`); `0` uses config `delay_ms` |
 | `-no-tui` | Skip interactive selector and use folders from config |
 | `-session` | Path to session file (default: `session/session.json`) |
 | `-config` | Path to config file (default: `mexporter.json`) |
 | `-out` | Output root directory |
+| `-base-url` | Mail API base URL (default: `https://e.mail.ru/api/v1/`) |
+| `-verify` | Check journal entries against files and exit |
+| `-verify-hash` | Also compare SHA-256 (implies `-verify`) |
+| `-json` | Write JSON to stdout for `-list`, export summary, or `-verify` |
+| `-allow-partial` | Exit 0 even when folders or threads failed |
 | `-v` | Verbose output |
 
 ## Session
@@ -86,9 +101,10 @@ If you do not have a session file yet, run:
 ```
 
 This mode:
-1. Opens the login page in your default browser (or prints the URL if automatic open fails).
-2. Lets you sign in manually in the browser.
-3. Prompts you to import session data as JSON (from a file path or pasted input) and saves it to the session file.
+1. Refuses to overwrite an existing session file unless `-force` is passed.
+2. Opens the login page in your default browser (or prints the URL if automatic open fails).
+3. Lets you sign in manually in the browser.
+4. Prompts you to import session data as JSON (from a file path or pasted input) and saves it to the session file.
 
 Required session JSON fields: `email`, `access_token`, `cookies` (array). Optional: `csrf_token`.
 
@@ -107,13 +123,19 @@ If the tool exits with code `2` during normal operation, the session is no longe
 ### Resume after interruption
 - Re-run the export with the same session/config/output paths.
 - Completed messages are skipped using the journal; failed ones are retried.
+- If a download stopped mid-write, the size mismatch makes the exporter download it again.
+
+### Verify and repair
+- Run `-verify` (or `-verify-hash` when journal entries include SHA-256).
+- Missing or size-mismatched files exit with code 1; rerunning the export re-downloads them.
 
 ### Multiple mailboxes
 - Use a separate `-session`, `-config`, and `-out` set per mailbox to keep state isolated.
 
 ### Safe trial run
 - Use `-dry-run -v` first to verify enumeration and folder mapping without downloading files.
-- Use `-limit N` to cap the number of processed threads for a quick test.
+- Use `-limit N` to cap the number of messages attempted for a quick test.
+- If some folders or threads fail, rerun after fixing the cause or pass `-allow-partial` to accept a partial result.
 
 ## Output layout
 
@@ -133,14 +155,15 @@ If the tool exits with code `2` during normal operation, the session is no longe
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Success |
-| `1` | Runtime or usage error |
+| `0` | Success, or accepted partial run with `-allow-partial` |
+| `1` | Runtime/usage error, failed integrity check, or partial export |
 | `2` | Authentication required or expired |
-| `130` | Canceled by user |
+| `130` | Canceled by user (including interactive selector quit) |
 
 ## Notes
 
 - Enumeration uses ascending date order to avoid missing messages during long runs.
 - Message identity is based on provider uidl.
-- Do not run multiple instances against the same output directory.
+- Do not run multiple instances against the same output directory; a lock file in each account directory enforces this (`-force` removes it).
 - Export directories may become very large; inspect logs/snapshots instead of scanning all files.
+- Session cookies from `mail.ru`, `vk.com`, `vk.ru`, and `userapi.com` domains are accepted; unrelated cookies are ignored.

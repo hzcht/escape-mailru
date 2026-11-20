@@ -25,15 +25,19 @@ const (
 	pagePause            = 120 * time.Millisecond
 	maxEnumerationOffset = 2_000_000
 	maxStalePages        = 2
-	firstBackoff         = time.Second
 	backoffFactor        = 3
 	maxAttempts          = 3
-	rateLimitPause       = 30 * time.Second
 	journalWriteTimeout  = 10 * time.Second
 )
 
-// progressInterval is a variable so tests can shorten it.
-var progressInterval = 5 * time.Second
+var (
+	// progressInterval is a variable so tests can shorten it.
+	progressInterval = 5 * time.Second
+	// retryFirstBackoff is a variable so tests can avoid real waits.
+	retryFirstBackoff = time.Second
+	// errLimitReached stops enumeration when the user limit is reached.
+	errLimitReached = errors.New("message limit reached")
+)
 
 // API is the subset of mailapi.Client used by the exporter.
 type API interface {
@@ -58,23 +62,30 @@ type Options struct {
 
 // FolderSummary reports one folder after a run.
 type FolderSummary struct {
-	FolderID   string
-	Path       string
-	Found      int
-	Downloaded int
-	Failed     int
-	Skipped    int
-	Bytes      int64
+	FolderID       string `json:"folder_id"`
+	Path           string `json:"path"`
+	Found          int    `json:"found"`
+	Downloaded     int    `json:"downloaded"`
+	Failed         int    `json:"failed"`
+	Skipped        int    `json:"skipped"`
+	ThreadsFailed  int    `json:"threads_failed"`
+	ThreadsPartial int    `json:"threads_partial"`
+	Partial        bool   `json:"partial"`
+	Bytes          int64  `json:"bytes"`
 }
 
 // Summary reports the whole run.
 type Summary struct {
-	Found      int
-	Downloaded int
-	Failed     int
-	Skipped    int
-	Bytes      int64
-	PerFolder  []FolderSummary
+	Found          int             `json:"found"`
+	Downloaded     int             `json:"downloaded"`
+	Failed         int             `json:"failed"`
+	Skipped        int             `json:"skipped"`
+	ThreadsFailed  int             `json:"threads_failed"`
+	ThreadsPartial int             `json:"threads_partial"`
+	FailedFolders  int             `json:"failed_folders"`
+	Partial        bool            `json:"partial"`
+	Bytes          int64           `json:"bytes"`
+	PerFolder      []FolderSummary `json:"per_folder"`
 }
 
 type job struct {
@@ -93,13 +104,16 @@ type Service struct {
 	opts    Options
 	seen    map[string]struct{}
 
-	found           atomic.Int64
-	downloaded      atomic.Int64
-	failed          atomic.Int64
-	skipped         atomic.Int64
-	bytes           atomic.Int64
-	totalDownloaded atomic.Int64
-	current         atomic.Value // string
+	found          atomic.Int64
+	downloaded     atomic.Int64
+	failed         atomic.Int64
+	skipped        atomic.Int64
+	threadsFailed  atomic.Int64
+	threadsPartial atomic.Int64
+	failedFolders  atomic.Int64
+	bytes          atomic.Int64
+	attempted      atomic.Int64
+	current        atomic.Value // string
 }
 
 // New builds a service. Zero workers/page size fall back to safe defaults.
@@ -137,13 +151,15 @@ func (s *Service) Run(ctx context.Context, nodes []*layout.Node) (Summary, error
 			continue
 		}
 		fs, err := s.runFolder(ctx, node)
-		if fs.Found > 0 || fs.Skipped > 0 || fs.Downloaded > 0 || fs.Failed > 0 || fs.Bytes > 0 {
+		if fs.Found > 0 || fs.Skipped > 0 || fs.Downloaded > 0 || fs.Failed > 0 ||
+			fs.Bytes > 0 || fs.ThreadsFailed > 0 || fs.ThreadsPartial > 0 || fs.Partial {
 			out = append(out, fs)
 		}
 		if err != nil {
 			if errors.Is(err, mailapi.ErrAuth) || errors.Is(err, context.Canceled) {
 				return s.summary(out), err
 			}
+			s.failedFolders.Add(1)
 			s.logf("folder %q: %v", node.Path, err)
 			continue
 		}
@@ -151,6 +167,10 @@ func (s *Service) Run(ctx context.Context, nodes []*layout.Node) (Summary, error
 			s.logf("limit of %d messages reached", s.opts.Limit)
 			break
 		}
+	}
+	// Cancellation during the last folder must not look like success.
+	if err := ctx.Err(); err != nil {
+		return s.summary(out), err
 	}
 	return s.summary(out), nil
 }
@@ -169,7 +189,8 @@ func (s *Service) selectedSet() map[string]bool {
 	return set
 }
 
-// runFolder exports one folder and returns its counters.
+// runFolder exports one folder and returns its counters. Enumeration is
+// streamed into the worker pool, so memory does not grow with the mailbox size.
 func (s *Service) runFolder(ctx context.Context, node *layout.Node) (FolderSummary, error) {
 	sum := FolderSummary{FolderID: node.ID.String(), Path: node.Path}
 	destDir := filepath.Join(s.opts.AccountDir, filepath.FromSlash(node.Path))
@@ -181,55 +202,183 @@ func (s *Service) runFolder(ctx context.Context, node *layout.Node) (FolderSumma
 	}
 	s.current.Store(node.Path)
 	s.logf("folder %q: enumerating %d messages", node.Path, node.MessagesTotal)
-	jobs, err := s.enumerateFolder(ctx, node)
-	if err != nil {
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch := make(chan job, s.opts.Workers*2)
+	var wg sync.WaitGroup
+	var mu sync.Mutex // Protected by mu: res, fatal.
+	var res downloadResult
+	var fatal error
+	fail := func(err error) {
+		mu.Lock()
+		if fatal == nil {
+			fatal = err
+		}
+		mu.Unlock()
+		cancel()
+	}
+	if !s.opts.DryRun {
+		for i := 0; i < s.opts.Workers; i++ {
+			wg.Add(1)
+			go func() { // Lifecycle: exits when ch closes or ctx is canceled; joined by wg.Wait.
+				defer wg.Done()
+				for j := range ch {
+					s.worker(ctx, j, &res, &mu, fail)
+				}
+			}()
+		}
+	}
+
+	pending := newPendingCache(s.opts.AccountDir, s.journal)
+	stats, enumErr := s.enumerateFolder(ctx, node, func(j job) error {
+		sum.Found++
+		s.found.Add(1)
+		if pending.exists(j) {
+			sum.Skipped++
+			s.skipped.Add(1)
+			return nil
+		}
+		if s.opts.DryRun {
+			return nil
+		}
+		if !s.reserve() {
+			return errLimitReached
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case ch <- j:
+			return nil
+		}
+	})
+	close(ch) // Closed by producer (runFolder).
+	wg.Wait()
+
+	mu.Lock()
+	sum.Downloaded, sum.Failed, sum.Bytes = res.downloaded, res.failed, res.bytes
+	fatalCopy := fatal
+	mu.Unlock()
+	sum.ThreadsFailed, sum.ThreadsPartial = stats.ThreadsFailed, stats.ThreadsPartial
+	s.threadsFailed.Add(int64(stats.ThreadsFailed))
+	s.threadsPartial.Add(int64(stats.ThreadsPartial))
+	if stats.Truncated {
+		sum.Partial = true
+		s.logf("folder %q: enumeration stopped before the end; rerun to continue", node.Path)
+	}
+	if fatalCopy != nil {
+		return sum, fatalCopy
+	}
+	if enumErr != nil && !errors.Is(enumErr, errLimitReached) {
+		sum.Partial = true
+		return sum, enumErr
+	}
+	if errors.Is(enumErr, errLimitReached) {
+		s.logf("limit of %d messages reached", s.opts.Limit)
+	}
+	if err := ctx.Err(); err != nil {
 		return sum, err
 	}
-	sum.Found = len(jobs)
-	s.found.Add(int64(len(jobs)))
-	pending := s.pendingJobs(jobs)
-	sum.Skipped = len(jobs) - len(pending)
-	s.skipped.Add(int64(sum.Skipped))
-	s.logf("folder %q: %d to download, %d already present", node.Path, len(pending), sum.Skipped)
-	if s.opts.DryRun || len(pending) == 0 {
-		return sum, nil
-	}
-	res, err := s.downloadFolder(ctx, pending)
-	sum.Downloaded, sum.Failed, sum.Bytes = res.downloaded, res.failed, res.bytes
-	return sum, err
+	return sum, nil
 }
 
-// pendingJobs drops messages that are already verified on disk.
-func (s *Service) pendingJobs(jobs []job) []job {
-	pending := make([]job, 0, len(jobs))
-	for _, j := range jobs {
-		e, ok := s.journal.Status(j.messageID)
-		if ok && e.Status == journal.StatusDownloaded {
-			st, err := os.Stat(filepath.Join(s.opts.AccountDir, filepath.FromSlash(e.Dest)))
-			if err == nil && st.Size() > 0 {
-				continue
-			}
-		}
-		pending = append(pending, j)
+// reserve atomically claims one slot in the user limit.
+func (s *Service) reserve() bool {
+	if s.opts.Limit <= 0 {
+		return true
 	}
-	return pending
+	for {
+		cur := s.attempted.Load()
+		if cur >= int64(s.opts.Limit) {
+			return false
+		}
+		if s.attempted.CompareAndSwap(cur, cur+1) {
+			return true
+		}
+	}
+}
+
+// pendingCache answers resume checks from directory listings instead of one
+// os.Stat call per message.
+type pendingCache struct {
+	accountDir string
+	journal    *journal.Journal
+	dirs       map[string]map[string]int64
+}
+
+func newPendingCache(accountDir string, j *journal.Journal) *pendingCache {
+	return &pendingCache{accountDir: accountDir, journal: j, dirs: map[string]map[string]int64{}}
+}
+
+func (p *pendingCache) exists(j job) bool {
+	if p.journal == nil {
+		return false
+	}
+	e, ok := p.journal.Status(j.messageID)
+	if !ok || e.Status != journal.StatusDownloaded || e.Size <= 0 || e.Dest == "" {
+		return false
+	}
+	dest := filepath.Join(p.accountDir, filepath.FromSlash(e.Dest))
+	rel, err := filepath.Rel(p.accountDir, dest)
+	if err != nil || !filepath.IsLocal(rel) {
+		return false
+	}
+	dir := filepath.Dir(dest)
+	sizes, ok := p.dirs[dir]
+	if !ok {
+		sizes = readDirSizes(dir)
+		p.dirs[dir] = sizes
+	}
+	size, ok := sizes[filepath.Base(dest)]
+	return ok && size == e.Size
+}
+
+func readDirSizes(dir string) map[string]int64 {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	sizes := make(map[string]int64, len(entries))
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		info, err := ent.Info()
+		if err == nil {
+			sizes[ent.Name()] = info.Size()
+		}
+	}
+	return sizes
 }
 
 // summary assembles counters for the final report.
 func (s *Service) summary(perFolder []FolderSummary) Summary {
-	return Summary{
-		Found:      int(s.found.Load()),
-		Downloaded: int(s.downloaded.Load()),
-		Failed:     int(s.failed.Load()),
-		Skipped:    int(s.skipped.Load()),
-		Bytes:      s.bytes.Load(),
-		PerFolder:  perFolder,
+	sum := Summary{
+		Found:          int(s.found.Load()),
+		Downloaded:     int(s.downloaded.Load()),
+		Failed:         int(s.failed.Load()),
+		Skipped:        int(s.skipped.Load()),
+		ThreadsFailed:  int(s.threadsFailed.Load()),
+		ThreadsPartial: int(s.threadsPartial.Load()),
+		FailedFolders:  int(s.failedFolders.Load()),
+		Bytes:          s.bytes.Load(),
+		PerFolder:      perFolder,
 	}
+	sum.Partial = sum.Failed > 0 || sum.ThreadsFailed > 0 || sum.ThreadsPartial > 0 || sum.FailedFolders > 0
+	if !sum.Partial {
+		for _, f := range perFolder {
+			if f.Partial {
+				sum.Partial = true
+				break
+			}
+		}
+	}
+	return sum
 }
 
 // limitReached reports whether the run limit was reached.
 func (s *Service) limitReached() bool {
-	return s.opts.Limit > 0 && s.totalDownloaded.Load() >= int64(s.opts.Limit)
+	return s.opts.Limit > 0 && s.attempted.Load() >= int64(s.opts.Limit)
 }
 
 // logf writes a diagnostic line when a logger is configured.

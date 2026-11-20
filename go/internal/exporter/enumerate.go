@@ -2,6 +2,7 @@ package exporter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -9,16 +10,22 @@ import (
 	"mexporter/internal/mailapi"
 )
 
-// enumerateFolder walks all pages and returns unique messages.
-func (s *Service) enumerateFolder(ctx context.Context, node *layout.Node) ([]job, error) {
+type enumStats struct {
+	ThreadsFailed  int
+	ThreadsPartial int
+	Truncated      bool
+}
+
+// enumerateFolder walks all pages and streams unique messages to emit.
+func (s *Service) enumerateFolder(ctx context.Context, node *layout.Node, emit func(job) error) (enumStats, error) {
+	var stats enumStats
 	folderID := node.ID.String()
-	var jobs []job
 	seenThreads := make(map[string]struct{})
 	stale := 0
 	for offset := 0; offset <= maxEnumerationOffset; {
 		body, err := s.api.ListPage(ctx, folderID, offset, s.opts.PageSize, mailapi.OrderAsc)
 		if err != nil {
-			return jobs, fmt.Errorf("REQ-EXPORT-001: list %q offset %d: %w", node.Path, offset, err)
+			return stats, fmt.Errorf("REQ-EXPORT-001: list %q offset %d: %w", node.Path, offset, err)
 		}
 		threads := joinThreads(body)
 		if len(threads) == 0 {
@@ -34,21 +41,71 @@ func (s *Service) enumerateFolder(ctx context.Context, node *layout.Node) ([]job
 			}
 			seenThreads[t.ID] = struct{}{}
 			newThreads++
-			jobs = s.appendThread(ctx, jobs, node, t)
+			msgs, failed, partial, err := s.resolveThread(ctx, t)
+			if err != nil {
+				return stats, err
+			}
+			if failed {
+				stats.ThreadsFailed++
+				s.logf("thread %s: expansion failed; it will be retried on the next run", t.ID)
+				continue
+			}
+			if partial {
+				stats.ThreadsPartial++
+				s.logf("thread %s: expanded %d of %d messages; exporting what the API returned", t.ID, len(msgs), t.Length)
+			}
+			for _, m := range msgs {
+				if m.ID == "" {
+					continue
+				}
+				if _, ok := s.seen[m.ID]; ok {
+					continue
+				}
+				s.seen[m.ID] = struct{}{}
+				msgFolderID := m.Folder.String()
+				if msgFolderID == "" {
+					msgFolderID = folderID
+				}
+				err := emit(job{
+					messageID:  m.ID,
+					folderID:   msgFolderID,
+					folderPath: node.Path,
+					subject:    m.Subject,
+					sender:     m.Correspondents.Sender(),
+					dateUnix:   m.Date,
+				})
+				if errors.Is(err, errLimitReached) {
+					return stats, nil
+				}
+				if err != nil {
+					return stats, err
+				}
+			}
 		}
 		stale = nextStale(stale, newThreads)
 		if stale >= maxStalePages {
+			stats.Truncated = true
+			s.logf("folder %q: pagination made no progress at offset %d", node.Path, offset)
+			break
+		}
+		// A pinned-only page does not advance the regular offset.
+		if len(body.Threads) == 0 {
 			break
 		}
 		offset += len(body.Threads)
+		if offset > maxEnumerationOffset {
+			stats.Truncated = true
+			s.logf("folder %q: reached the enumeration offset limit at %d", node.Path, offset)
+			break
+		}
 		if len(body.Threads) < s.opts.PageSize && len(body.Pinned.Messages) == 0 {
 			break
 		}
 		if err := sleepCtx(ctx, pagePause); err != nil {
-			return jobs, err
+			return stats, err
 		}
 	}
-	return jobs, nil
+	return stats, nil
 }
 
 // joinThreads merges regular and pinned rows without mutating the response.
@@ -67,50 +124,34 @@ func nextStale(stale, newThreads int) int {
 	return 0
 }
 
-// appendThread resolves a thread and appends its new messages as jobs.
-func (s *Service) appendThread(ctx context.Context, jobs []job, node *layout.Node, t mailapi.Thread) []job {
-	for _, m := range s.resolveThread(ctx, t) {
-		if m.ID == "" {
-			continue
-		}
-		if _, ok := s.seen[m.ID]; ok {
-			continue
-		}
-		s.seen[m.ID] = struct{}{}
-		folderID := m.Folder.String()
-		if folderID == "" {
-			folderID = node.ID.String()
-		}
-		jobs = append(jobs, job{
-			messageID:  m.ID,
-			folderID:   folderID,
-			folderPath: node.Path,
-			subject:    m.Subject,
-			sender:     m.Correspondents.Sender(),
-			dateUnix:   m.Date,
-		})
-	}
-	return jobs
-}
-
-// resolveThread expands multi-message threads, falling back to the newest message.
-func (s *Service) resolveThread(ctx context.Context, t mailapi.Thread) []mailapi.Message {
+// resolveThread expands multi-message threads. A failed thread is reported
+// instead of silently falling back to its newest message.
+func (s *Service) resolveThread(ctx context.Context, t mailapi.Thread) ([]mailapi.Message, bool, bool, error) {
 	last := t.Last
 	if t.Expand != nil && *t.Expand != "" {
 		last = *t.Expand
 	}
 	if t.Length <= 1 {
-		return fallbackMessage(t, last)
+		msgs := fallbackMessage(t, last)
+		if len(msgs) == 0 {
+			return nil, true, false, nil
+		}
+		return msgs, false, false, nil
 	}
 	msgs, err := s.api.ThreadMessages(ctx, t.ID)
 	if err != nil {
-		s.logf("thread %s: expand failed (%v), using newest message only", t.ID, err)
-		return fallbackMessage(t, last)
+		if errors.Is(err, mailapi.ErrAuth) || errors.Is(err, context.Canceled) {
+			return nil, false, false, err
+		}
+		s.logf("thread %s: expand failed: %v", t.ID, err)
+		return nil, true, false, nil
 	}
 	if len(msgs) == 0 {
-		return fallbackMessage(t, last)
+		s.logf("thread %s: expand returned no messages", t.ID)
+		return nil, true, false, nil
 	}
-	return msgs
+	partial := t.Length > 0 && len(msgs) < t.Length
+	return msgs, false, partial, nil
 }
 
 // fallbackMessage builds a synthetic message from the thread row.

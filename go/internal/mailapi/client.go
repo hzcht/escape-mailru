@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,7 +22,12 @@ const (
 	downloadTimeout  = 10 * time.Minute
 	maxJSONBytes     = 32 << 20
 	maxMessageBytes  = 128 << 20
+	maxRetries       = 3
+	retryFactor      = 3
+	errorBodyBytes   = 4 << 10
 )
+
+var retryFirstBackoff = time.Second
 
 var (
 	// ErrAuth means the session expired or was rejected.
@@ -40,6 +46,23 @@ type APIError struct {
 func (e *APIError) Error() string {
 	return fmt.Sprintf("api status %d: %s", e.Status, e.Body)
 }
+
+// RateLimitError carries the server's Retry-After hint while still matching
+// ErrRateLimited through errors.Is.
+type RateLimitError struct {
+	RetryAfter time.Duration
+}
+
+// Error implements error.
+func (e *RateLimitError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("rate limited (retry after %s)", e.RetryAfter)
+	}
+	return "rate limited"
+}
+
+// Is lets callers keep using errors.Is(err, ErrRateLimited).
+func (e *RateLimitError) Is(target error) bool { return target == ErrRateLimited }
 
 // Options configures a Client. BaseURL exists for tests.
 type Options struct {
@@ -60,7 +83,8 @@ type Client struct {
 	baseURL     string
 }
 
-// New builds a client. The caller owns retries and rate limiting.
+// New builds a client. The client retries transient transport failures and
+// rate limits internally; callers only handle the final error.
 func New(o Options) *Client {
 	base := strings.TrimRight(o.BaseURL, "/")
 	if base == "" {
@@ -70,8 +94,12 @@ func New(o Options) *Client {
 	if ua == "" {
 		ua = defaultUserAgent
 	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 16
+	transport.IdleConnTimeout = 90 * time.Second
 	return &Client{
-		http:        &http.Client{},
+		http:        &http.Client{Transport: transport},
 		email:       o.Email,
 		accessToken: o.AccessToken,
 		cookies:     o.CookieHeader,
@@ -93,7 +121,7 @@ func (c *Client) buildURL(path string, params url.Values) string {
 	return c.baseURL + "/" + strings.TrimLeft(path, "/") + "?" + q.Encode()
 }
 
-// getBytes performs a bounded GET and classifies HTTP errors.
+// getBytes performs one bounded GET and classifies HTTP errors.
 func (c *Client) getBytes(ctx context.Context, path string, params url.Values, timeout time.Duration, limit int64) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -111,8 +139,9 @@ func (c *Client) getBytes(ctx context.Context, path string, params url.Values, t
 	}
 	// NOERR: the body is read below; a close error cannot change the result.
 	defer resp.Body.Close()
-	if err := classifyHTTP(resp.StatusCode); err != nil {
-		return nil, err
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodyBytes))
+		return nil, classifyHTTP(resp.StatusCode, string(body), retryAfter(resp))
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
@@ -124,30 +153,55 @@ func (c *Client) getBytes(ctx context.Context, path string, params url.Values, t
 	return raw, nil
 }
 
+// retryAfter parses the Retry-After header in seconds or HTTP-date form.
+func retryAfter(resp *http.Response) time.Duration {
+	value := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+		return 0
+	}
+	if when, err := http.ParseTime(value); err == nil {
+		if d := time.Until(when); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
 // classifyHTTP maps HTTP status codes to sentinel errors.
-func classifyHTTP(code int) error {
+func classifyHTTP(code int, body string, wait time.Duration) error {
 	switch {
 	case code == http.StatusUnauthorized || code == http.StatusForbidden:
 		return ErrAuth
 	case code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable:
-		return ErrRateLimited
+		return &RateLimitError{RetryAfter: wait}
 	case code >= 400:
-		return &APIError{Status: code}
+		return &APIError{Status: code, Body: strings.TrimSpace(body)}
 	}
 	return nil
 }
 
 // classifyEnvelope maps the API-level status to sentinel errors.
 func classifyEnvelope(status flexString) error {
-	switch string(status) {
+	s := strings.TrimSpace(string(status))
+	switch s {
 	case "", "ok", "200":
 		return nil
 	case "401", "403":
 		return ErrAuth
 	case "429", "503":
-		return ErrRateLimited
+		return &RateLimitError{}
 	default:
-		return &APIError{Status: http.StatusOK, Body: string(status)}
+		code, err := strconv.Atoi(s)
+		if err != nil || code < 400 {
+			code = http.StatusBadRequest
+		}
+		return &APIError{Status: code, Body: s}
 	}
 }
 
@@ -156,26 +210,97 @@ type envelope struct {
 	Body   json.RawMessage `json:"body"`
 }
 
-// getJSON performs a GET and decodes the envelope and its body.
+// getJSON performs a GET and decodes the envelope and its body. Transient
+// transport and API errors are retried by the client.
 func (c *Client) getJSON(ctx context.Context, path string, params url.Values, out any) error {
-	raw, err := c.getBytes(ctx, path, params, listTimeout, maxJSONBytes)
+	var body json.RawMessage
+	err := retry(ctx, func() error {
+		raw, err := c.getBytes(ctx, path, params, listTimeout, maxJSONBytes)
+		if err != nil {
+			return err
+		}
+		var env envelope
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return fmt.Errorf("decode envelope: %w", err)
+		}
+		if err := classifyEnvelope(env.Status); err != nil {
+			return err
+		}
+		body = env.Body
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	var env envelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("decode envelope: %w", err)
-	}
-	if err := classifyEnvelope(env.Status); err != nil {
-		return err
-	}
-	if out == nil || len(env.Body) == 0 {
+	if out == nil || len(body) == 0 {
 		return nil
 	}
-	if err := json.Unmarshal(env.Body, out); err != nil {
+	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("decode body: %w", err)
 	}
 	return nil
+}
+
+// retry runs fn with bounded exponential backoff. Authentication errors,
+// permanent 4xx responses and caller cancellation are not retried, and the
+// final failure is not followed by an unnecessary sleep.
+func retry(ctx context.Context, fn func() error) error {
+	backoff := retryFirstBackoff
+	var last error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		last = err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if terminalError(err) {
+			return err
+		}
+		if attempt == maxRetries {
+			break
+		}
+		pause := backoff
+		var limited *RateLimitError
+		if errors.As(err, &limited) && limited.RetryAfter > 0 {
+			pause = limited.RetryAfter
+		}
+		if err := sleepCtx(ctx, pause); err != nil {
+			return err
+		}
+		backoff *= retryFactor
+	}
+	return last
+}
+
+func terminalError(err error) bool {
+	if errors.Is(err, ErrAuth) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status >= 400 && apiErr.Status < 500 && apiErr.Status != http.StatusRequestTimeout && apiErr.Status != http.StatusTooManyRequests
+	}
+	return false
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // listParams builds the shared threads/status/smart query.
@@ -248,19 +373,27 @@ func (c *Client) DownloadRaw(ctx context.Context, messageID, folderID string) ([
 		"id":        {messageID},
 		"folder_id": {folderID},
 	}
-	raw, err := c.getBytes(ctx, "messages/message/download", params, downloadTimeout, maxMessageBytes)
+	var data []byte
+	err := retry(ctx, func() error {
+		raw, err := c.getBytes(ctx, "messages/message/download", params, downloadTimeout, maxMessageBytes)
+		if err != nil {
+			return err
+		}
+		if len(raw) > 0 && raw[0] == '{' {
+			var env envelope
+			if json.Unmarshal(raw, &env) == nil {
+				if err := classifyEnvelope(env.Status); err != nil {
+					return err
+				}
+			}
+		}
+		data = raw
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("download %s: %w", messageID, err)
 	}
-	if len(raw) > 0 && raw[0] == '{' {
-		var env envelope
-		if json.Unmarshal(raw, &env) == nil {
-			if err := classifyEnvelope(env.Status); err != nil {
-				return nil, fmt.Errorf("download %s: %w", messageID, err)
-			}
-		}
-	}
-	return raw, nil
+	return data, nil
 }
 
 // LooksLikeEml performs a cheap header sanity check on downloaded bytes.
