@@ -100,6 +100,31 @@ func TestFoldersAndHeaders(t *testing.T) {
 	}
 }
 
+func TestProbe(t *testing.T) {
+	client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/threads/status/smart" || r.URL.Query().Get("limit") != "1" {
+			t.Errorf("request = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"status":200,"email":" canonical@example.test ","body":{}}`))
+	})
+	email, err := client.Probe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if email != "canonical@example.test" {
+		t.Fatalf("email = %q", email)
+	}
+}
+
+func TestProbeRejectsExpiredSession(t *testing.T) {
+	client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"status":403,"email":"user@mail_ru_hosted_domain","body":"token"}`))
+	})
+	if _, err := client.Probe(context.Background()); !errors.Is(err, ErrAuth) {
+		t.Fatalf("err = %v, want ErrAuth", err)
+	}
+}
+
 func TestFoldersErrors(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
 		c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -310,6 +335,69 @@ func TestBuildURL(t *testing.T) {
 	if u.Path != "/api/x" || u.Query().Get("a") != "b" || u.Query().Get("access_token") != "t" {
 		t.Fatalf("url = %s", raw)
 	}
+}
+
+func TestBuildURLPrefersWebToken(t *testing.T) {
+	c := New(Options{Email: "e", AccessToken: "a", Token: "w", BaseURL: "https://example.test/api/"})
+	u, err := url.Parse(c.buildURL("x", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Get("token") != "w" {
+		t.Fatalf("token = %q", u.Query().Get("token"))
+	}
+	if u.Query().Has("access_token") {
+		t.Fatalf("access_token must not be sent next to token: %s", u.RawQuery)
+	}
+}
+
+func TestFetchWebToken(t *testing.T) {
+	const page = `<html><head><script nonce="x" type="application/json" id="sota.config" crossorigin="anonymous">
+{"userConfig":{"authCSRFToken":"csrf","api":[{"method":"/api/v1/user/short","data":{"status":"200","email":"user@example.test","body":{"token":"web-token"}}},{"method":"/api/v1/helpers","data":{"status":"200","body":[{"index":5}]}}]}}
+</script></head></html>`
+	client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/inbox/" || r.URL.Query().Get("wv") != "1" {
+			t.Errorf("request = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		if r.Header.Get("Cookie") != "s=1; t=2" {
+			t.Errorf("cookie = %q", r.Header.Get("Cookie"))
+		}
+		_, _ = w.Write([]byte(page))
+	})
+	token, email, err := client.FetchWebToken(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "web-token" || email != "user@example.test" {
+		t.Fatalf("token = %q, email = %q", token, email)
+	}
+}
+
+func TestFetchWebTokenErrors(t *testing.T) {
+	t.Run("no bootstrap", func(t *testing.T) {
+		c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`<html></html>`))
+		})
+		if _, _, err := c.FetchWebToken(context.Background()); err == nil {
+			t.Fatal("expected missing bootstrap error")
+		}
+	})
+	t.Run("no token", func(t *testing.T) {
+		c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`<script id="sota.config" type="application/json">{"userConfig":{"api":[{"method":"/api/v1/user/short","data":{"status":"200","body":{}}}]}}</script>`))
+		})
+		if _, _, err := c.FetchWebToken(context.Background()); err == nil {
+			t.Fatal("expected missing token error")
+		}
+	})
+	t.Run("signed out", func(t *testing.T) {
+		c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		})
+		if _, _, err := c.FetchWebToken(context.Background()); !errors.Is(err, ErrAuth) {
+			t.Fatalf("err = %v", err)
+		}
+	})
 }
 
 func TestLooksLikeEml(t *testing.T) {

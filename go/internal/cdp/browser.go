@@ -148,6 +148,37 @@ func (b *Browser) Target(ctx context.Context) (string, error) {
 	}
 }
 
+// PageTarget is one page target reported by the DevTools endpoint.
+//
+// Sign-in flows often open a second tab, so a caller that only watches the
+// first page can miss all of the signed-in traffic.
+type PageTarget struct {
+	URL                  string
+	WebSocketDebuggerURL string
+}
+
+// PageTargets lists the browser's current page targets.
+func (b *Browser) PageTargets(ctx context.Context) ([]PageTarget, error) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("http://127.0.0.1:%d/json/list", b.port), nil)
+	if err != nil {
+		return nil, err
+	}
+	targets, err := fetchTargets(client, req)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PageTarget, 0, len(targets))
+	for _, t := range targets {
+		if t.Type != "page" || t.WebSocketDebuggerURL == "" {
+			continue
+		}
+		out = append(out, PageTarget{URL: t.URL, WebSocketDebuggerURL: t.WebSocketDebuggerURL})
+	}
+	return out, nil
+}
+
 // target is one entry of the DevTools /json/list response.
 type target struct {
 	Type                 string `json:"type"`

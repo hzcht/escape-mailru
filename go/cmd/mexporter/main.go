@@ -30,26 +30,27 @@ import (
 )
 
 type cliFlags struct {
-	sessionPath  string
-	configPath   string
-	outDir       string
-	folderIDs    string
-	workers      int
-	limit        int
-	pageSize     int
-	delay        time.Duration
-	listOnly     bool
-	dryRun       bool
-	verbose      bool
-	noTUI        bool
-	initSession  bool
-	loginURL     string
-	baseURL      string
-	verify       bool
-	verifyHash   bool
-	jsonOut      bool
-	allowPartial bool
-	force        bool
+	sessionPath    string
+	configPath     string
+	outDir         string
+	folderIDs      string
+	workers        int
+	limit          int
+	pageSize       int
+	delay          time.Duration
+	listOnly       bool
+	dryRun         bool
+	verbose        bool
+	noTUI          bool
+	initSession    bool
+	refreshSession bool
+	loginURL       string
+	baseURL        string
+	verify         bool
+	verifyHash     bool
+	jsonOut        bool
+	allowPartial   bool
+	force          bool
 }
 
 const (
@@ -78,6 +79,9 @@ func run(args []string) int {
 			return fail(err)
 		}
 	}
+	if fl.refreshSession {
+		return runRefreshSession(fl)
+	}
 	if fl.verifyHash {
 		fl.verify = true
 	}
@@ -97,6 +101,7 @@ func run(args []string) int {
 	cli := mailapi.New(mailapi.Options{
 		Email:        sess.Email,
 		AccessToken:  sess.AccessToken,
+		Token:        sess.Token,
 		CookieHeader: sess.CookieHeader(time.Now()),
 		BaseURL:      fl.baseURL,
 	})
@@ -146,6 +151,7 @@ func parseFlags(args []string) (cliFlags, error) {
 	fs.BoolVar(&fl.verbose, "v", false, "log every downloaded message")
 	fs.BoolVar(&fl.noTUI, "no-tui", false, "use config folders without the selector")
 	fs.BoolVar(&fl.initSession, "init-session", false, "create or replace the session file via guided manual login/import")
+	fs.BoolVar(&fl.refreshSession, "refresh-session", false, "refresh the web-session token from the mail UI using the stored cookies")
 	fs.StringVar(&fl.loginURL, "login-url", "https://e.mail.ru/", "URL to open in browser during -init-session")
 	fs.StringVar(&fl.baseURL, "base-url", "", "mail API base URL (default: https://e.mail.ru/api/v1/)")
 	fs.BoolVar(&fl.verify, "verify", false, "check the journal against existing files and exit")
@@ -421,6 +427,49 @@ func humanBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// runRefreshSession updates the web-session token using the stored cookies.
+// The mail UI embeds that token into its bootstrap page, so this works without
+// opening a browser as long as the cookies are still valid.
+func runRefreshSession(fl cliFlags) int {
+	sess, err := session.Load(fl.sessionPath)
+	if err != nil {
+		return fail(err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	bootstrap := mailapi.New(mailapi.Options{
+		Email:        sess.Email,
+		AccessToken:  sess.AccessToken,
+		Token:        sess.Token,
+		CookieHeader: sess.CookieHeader(time.Now()),
+		BaseURL:      fl.baseURL,
+	})
+	token, email, err := bootstrap.FetchWebToken(ctx)
+	if err != nil {
+		return fail(fmt.Errorf("refresh session: %w (the stored cookies may have expired; run -init-session -force)", err))
+	}
+	if email != "" {
+		sess.Email = email
+	}
+	sess.Token = token
+
+	verify := mailapi.New(mailapi.Options{
+		Email:        sess.Email,
+		Token:        sess.Token,
+		CookieHeader: sess.CookieHeader(time.Now()),
+		BaseURL:      fl.baseURL,
+	})
+	if _, err := verify.Probe(ctx); err != nil {
+		return fail(fmt.Errorf("refresh session: the fetched token was rejected: %w", err))
+	}
+	if err := session.Save(fl.sessionPath, sess); err != nil {
+		return fail(err)
+	}
+	logf("session refreshed: %s (account: %s)", fl.sessionPath, sess.Email)
+	return exitOK
 }
 
 // runVerify checks the journal against files without contacting the API.

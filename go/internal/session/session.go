@@ -22,9 +22,14 @@ type Cookie struct {
 }
 
 // Session holds the minimum state required to call the mail API.
+//
+// Token is the web-session token the current mail UI passes as "token" next
+// to the cookies; AccessToken is the older query credential. A session carries
+// whichever one the account uses.
 type Session struct {
 	Email       string   `json:"email"`
 	AccessToken string   `json:"access_token"`
+	Token       string   `json:"token"`
 	CSRFToken   string   `json:"csrf_token"`
 	Cookies     []Cookie `json:"cookies"`
 }
@@ -55,8 +60,8 @@ func Validate(s Session) error {
 	switch {
 	case s.Email == "":
 		return fmt.Errorf("REQ-EXPORT-010: session email is empty")
-	case s.AccessToken == "":
-		return fmt.Errorf("REQ-EXPORT-010: session access_token is empty")
+	case s.AccessToken == "" && s.Token == "":
+		return fmt.Errorf("REQ-EXPORT-010: session has neither access_token nor token")
 	case len(s.Cookies) == 0:
 		return fmt.Errorf("REQ-EXPORT-010: session cookies are empty")
 	case s.CookieHeader(time.Now()) == "":

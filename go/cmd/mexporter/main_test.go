@@ -322,6 +322,44 @@ func TestBootstrapSessionRefusesExisting(t *testing.T) {
 	}
 }
 
+func TestRunRefreshSession(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/inbox/" && r.URL.Query().Get("wv") == "1":
+			_, _ = w.Write([]byte(`<script id="sota.config" type="application/json">` +
+				`{"userConfig":{"authCSRFToken":"csrf","api":[{"method":"/api/v1/user/short","data":{"status":"200","email":"refreshed@example.test","body":{"token":"web-token"}}}]}}` +
+				`</script>`))
+		case r.URL.Path == "/api/v1/threads/status/smart":
+			if got := r.URL.Query().Get("token"); got != "web-token" {
+				t.Errorf("token = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"status":200,"email":"refreshed@example.test","body":{}}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), "session.json")
+	if err := session.Save(path, session.Session{
+		Email: "old@example.test", Token: "stale",
+		Cookies: []session.Cookie{{Name: "s", Value: "1", Domain: ".mail.ru"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if code := runRefreshSession(cliFlags{sessionPath: path, baseURL: srv.URL + "/api/v1"}); code != exitOK {
+		t.Fatalf("exit = %d", code)
+	}
+	got, err := session.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Token != "web-token" || got.Email != "refreshed@example.test" {
+		t.Fatalf("session = %+v", got)
+	}
+}
+
 func TestPrintTreeAndSummaryJSON(t *testing.T) {
 	got := captureStdout(t, func() { printTreeJSON(testNodes()) })
 	if !strings.Contains(got, `"id": "0"`) || !strings.Contains(got, `"path": "Inbox/child"`) {

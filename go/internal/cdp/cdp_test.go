@@ -251,6 +251,29 @@ func TestTargetUsesDevToolsEndpoint(t *testing.T) {
 	}
 }
 
+func TestPageTargetsListsOnlyPages(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/json/list" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		fmt.Fprint(w, `[
+			{"type":"page","url":"https://e.mail.ru/inbox/","webSocketDebuggerUrl":"ws://127.0.0.1:9/devtools/page/1"},
+			{"type":"page","url":"https://id.vk.ru/","webSocketDebuggerUrl":"ws://127.0.0.1:9/devtools/page/2"},
+			{"type":"background","url":"https://e.mail.ru/","webSocketDebuggerUrl":"ws://127.0.0.1:9/devtools/page/3"}
+		]`)
+	}))
+	defer srv.Close()
+
+	b := &Browser{port: portOf(t, srv.URL)}
+	targets, err := b.PageTargets(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 || targets[1].URL != "https://id.vk.ru/" {
+		t.Fatalf("targets = %+v", targets)
+	}
+}
+
 func TestTargetReportsMissingTargets(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `[]`)

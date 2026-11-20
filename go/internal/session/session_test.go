@@ -123,12 +123,19 @@ func TestValidate(t *testing.T) {
 	if err := Validate(Session{Email: "u", AccessToken: "t", Cookies: []Cookie{{Name: "s"}}}); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
+	if err := Validate(Session{Email: "u", Token: "w", Cookies: []Cookie{{Name: "s"}}}); err != nil {
+		t.Fatalf("Validate web token: %v", err)
+	}
+	if err := Validate(Session{Email: "u", Cookies: []Cookie{{Name: "s"}}}); err == nil {
+		t.Fatal("expected error without any token")
+	}
 }
 
 func validSession() Session {
 	return Session{
 		Email:       "user@example.com",
 		AccessToken: "t",
+		Token:       "w",
 		CSRFToken:   "c",
 		Cookies:     []Cookie{{Name: "s", Value: "1", Domain: ".mail.ru"}},
 	}
@@ -144,7 +151,7 @@ func TestSaveAndLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Email != in.Email || out.AccessToken != in.AccessToken || out.CSRFToken != in.CSRFToken || len(out.Cookies) != 1 {
+	if out.Email != in.Email || out.AccessToken != in.AccessToken || out.Token != in.Token || out.CSRFToken != in.CSRFToken || len(out.Cookies) != 1 {
 		t.Fatalf("loaded = %+v", out)
 	}
 }

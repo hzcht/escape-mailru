@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- `-refresh-session` refreshes the web-session `token` from the mail UI bootstrap using the stored cookies, without opening a browser.
+- Session files accept the current web-session `token` field (sent as the `token` query parameter next to the cookies) in addition to the older `access_token`.
 - Session bootstrap mode (`-init-session`, mode 0): open browser for manual sign-in, import session JSON, save session file, and continue. Existing session files require `-force`.
 - Automatic session capture through a debuggable Chrome/Edge window during `-init-session`: the app reads `access_token`, e-mail, CSRF token and cookies from the browser's own traffic and falls back to manual JSON import when the browser cannot be driven.
 - Offline integrity check (`-verify`, `-verify-hash`) comparing journal records with files, including optional SHA-256.
@@ -17,6 +19,7 @@
 - Folder-ID validation, JSON output, and guided session replacement safeguards.
 
 ### Changed
+- Automatic session capture now prefers the token the mail UI embeds into its inbox bootstrap (cookie-based sessions authorize with `token`, not `access_token`); it still watches every browser tab, ranks any sniffed tokens (signed-in before guest `anonym.` tokens, newest first), checks candidates against the API with fresh cookies, and falls back to manual import instead of saving a session the API rejects. The wait after sign-in is two minutes, and candidate sources are logged without token values.
 - `-limit` now counts attempted messages rather than threads; `-delay` accepts Go durations.
 - Thread expansion failures and truncation are reported instead of silently falling back.
 - Journal loading keeps snapshot entries when JSONL is empty or corrupt.

@@ -67,12 +67,59 @@ func TestCapturedAuthIgnoresOtherMethods(t *testing.T) {
 	}
 }
 
-func TestInboxOf(t *testing.T) {
-	if got, want := inboxOf("https://e.mail.ru/?foo=1#bar"), "https://e.mail.ru/inbox/"; got != want {
-		t.Fatalf("inboxOf = %q, want %q", got, want)
+func TestCapturedAuthPrefersSignedInAPIToken(t *testing.T) {
+	a := newCapturedAuth("https://e.mail.ru/api/v1/")
+	a.observe("https://e.mail.ru/api/v1/threads/status/smart?access_token=anonym.guest&email=u@mail.ru")
+	a.observe("https://e.mail.ru/api/v1/threads/status/smart?access_token=real")
+	a.observe("https://id.example.test/?access_token=other")
+	tokens := a.tokens()
+	want := []string{"real", "other", "anonym.guest"}
+	if len(tokens) != len(want) {
+		t.Fatalf("tokens = %v, want %v", tokens, want)
 	}
-	if got, want := inboxOf("not a url"), "not a url"; got != want {
-		t.Fatalf("inboxOf invalid = %q, want %q", got, want)
+	for i := range want {
+		if tokens[i] != want[i] {
+			t.Fatalf("tokens = %v, want %v", tokens, want)
+		}
+	}
+}
+
+func TestCapturedAuthPrefersNewestToken(t *testing.T) {
+	a := newCapturedAuth("https://e.mail.ru/api/v1/")
+	a.observe("https://e.mail.ru/api/v1/threads/status/smart?access_token=old")
+	a.observe("https://e.mail.ru/api/v1/threads/status/smart?access_token=new")
+	if got := a.token(); got != "new" {
+		t.Fatalf("token = %q, want newest", got)
+	}
+}
+
+func TestCapturedAuthKeepsGuestTokenAsLastResort(t *testing.T) {
+	a := newCapturedAuth("https://e.mail.ru/api/v1/")
+	a.observe("https://e.mail.ru/api/v1/threads/status/smart?access_token=anonym.guest")
+	if got := a.token(); got != "anonym.guest" {
+		t.Fatalf("token = %q, want the guest token", got)
+	}
+}
+
+func TestCapturedAuthDedupesTokens(t *testing.T) {
+	a := newCapturedAuth("https://e.mail.ru/api/v1/")
+	a.observe("https://e.mail.ru/api/v1/x?access_token=same")
+	a.observe("https://e.mail.ru/api/v1/x?access_token=same")
+	if got := len(a.tokens()); got != 1 {
+		t.Fatalf("token count = %d, want 1", got)
+	}
+}
+
+func TestRequestHostDropsQuery(t *testing.T) {
+	got := requestHost("https://e.mail.ru/api/v1/threads/status/smart?access_token=secret")
+	if got != "e.mail.ru/api/v1/threads/status/smart" {
+		t.Fatalf("requestHost = %q", got)
+	}
+	if strings.Contains(got, "secret") {
+		t.Fatal("requestHost leaked the query")
+	}
+	if got := requestHost("access_token=secret"); got != "a request body" {
+		t.Fatalf("requestHost body = %q", got)
 	}
 }
 

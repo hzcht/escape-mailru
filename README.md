@@ -68,7 +68,8 @@ Run commands from the project root.
 
 | Flag | Description |
 | --- | --- |
-| `-init-session` | Guided session setup: open browser for manual sign-in, then import and save session data |
+| `-init-session` | Guided session setup: open browser for manual sign-in, then capture cookies and the web-session token |
+| `-refresh-session` | Refresh the web-session token from the mail UI using the stored cookies (no browser) |
 | `-login-url` | URL to open during `-init-session` (default: `https://e.mail.ru/`) |
 | `-force` | Replace an existing session (`-init-session`) or remove a stale/active export lock |
 | `-list` | Print folder tree and exit |
@@ -102,10 +103,18 @@ If you do not have a session file yet, run:
 
 This mode:
 1. Refuses to overwrite an existing session file unless `-force` is passed.
-2. Tries to capture the session automatically: it opens the login page in a debuggable Chrome/Edge window, you sign in manually, and the app reads `access_token`, e-mail, CSRF token and cookies from the browser's traffic.
+2. Tries to capture the session automatically: it opens the login page in a debuggable Chrome/Edge window and you sign in manually. It then reads the session cookies from the browser and fetches the web-session token that the mail UI embeds into its inbox page (`/api/v1/user/short`). The resulting session is checked against the API before the file is written; if nothing is accepted, it falls back to manual import.
 3. Falls back to manual import if automatic capture cannot run: you export session JSON (fields `email`, `access_token`, `cookies` and optionally `csrf_token`) from the browser, save it to a file or paste it into the prompt, and the app saves it to the session file.
 
-Required session JSON fields: `email`, `access_token`, `cookies` (array). Optional: `csrf_token`.
+Required session JSON fields: `email`, `cookies` (array) and either `token` (current web UI) or `access_token` (older sessions). Optional: `csrf_token`.
+
+The web-session `token` expires independently of the cookies. Refresh it without signing in again:
+
+```powershell
+.\go\mexporter.exe -refresh-session
+```
+
+This fetches a fresh token from the mail UI using the stored cookies and saves it back to the same session file.
 
 After saving, the app continues with the requested action in the same run (for example `-list`, folder selection, or export). If the session is invalid, the command will fail when it tries to access the API.
 

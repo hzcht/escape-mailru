@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ const (
 	downloadTimeout  = 10 * time.Minute
 	maxJSONBytes     = 32 << 20
 	maxMessageBytes  = 128 << 20
+	maxUIBytes       = 8 << 20
 	maxRetries       = 3
 	retryFactor      = 3
 	errorBodyBytes   = 4 << 10
@@ -68,6 +70,7 @@ func (e *RateLimitError) Is(target error) bool { return target == ErrRateLimited
 type Options struct {
 	Email        string
 	AccessToken  string
+	Token        string
 	CookieHeader string
 	UserAgent    string
 	BaseURL      string
@@ -78,6 +81,7 @@ type Client struct {
 	http        *http.Client
 	email       string
 	accessToken string
+	token       string
 	cookies     string
 	userAgent   string
 	baseURL     string
@@ -102,6 +106,7 @@ func New(o Options) *Client {
 		http:        &http.Client{Transport: transport},
 		email:       o.Email,
 		accessToken: o.AccessToken,
+		token:       o.Token,
 		cookies:     o.CookieHeader,
 		userAgent:   ua,
 		baseURL:     base,
@@ -115,7 +120,11 @@ func (c *Client) buildURL(path string, params url.Values) string {
 		q[k] = v
 	}
 	q.Set("email", c.email)
-	q.Set("access_token", c.accessToken)
+	if c.token != "" {
+		q.Set("token", c.token)
+	} else {
+		q.Set("access_token", c.accessToken)
+	}
 	q.Set("htmlencoded", "false")
 	q.Set("_", fmt.Sprintf("%d", time.Now().UnixMilli()))
 	return c.baseURL + "/" + strings.TrimLeft(path, "/") + "?" + q.Encode()
@@ -207,6 +216,7 @@ func classifyEnvelope(status flexString) error {
 
 type envelope struct {
 	Status flexString      `json:"status"`
+	Email  string          `json:"email"`
 	Body   json.RawMessage `json:"body"`
 }
 
@@ -321,6 +331,131 @@ func listParams(folderID string, offset, limit int, order Order) url.Values {
 		"pinned_limit":                 {"50"},
 		"remove_emoji_opts":            {`{"remove_from_sender_name":true,"remove_from_snippet":true,"remove_from_subject":true}`},
 	}
+}
+
+// webBootstrap is the part of the mail UI bootstrap that this client reads.
+type webBootstrap struct {
+	UserConfig struct {
+		CSRFToken string `json:"authCSRFToken"`
+		API       []struct {
+			Method string `json:"method"`
+			Data   struct {
+				Status flexString      `json:"status"`
+				Email  string          `json:"email"`
+				Body   json.RawMessage `json:"body"`
+			} `json:"data"`
+		} `json:"api"`
+	} `json:"userConfig"`
+}
+
+var webBootstrapScript = regexp.MustCompile(`(?s)<script[^>]*id=["']sota\.config["'][^>]*>(.*?)</script>`)
+
+// FetchWebToken reads the web-session token from the mailbox web UI bootstrap.
+//
+// The current mail UI authorizes API calls with a "token" query parameter that
+// the server embeds into the inbox page as a prefetched /api/v1/user/short
+// response. Fetching that page needs only the session cookies, so a session
+// whose token expired can be refreshed without signing in again.
+func (c *Client) FetchWebToken(ctx context.Context) (token, email string, err error) {
+	ui, err := c.webUIURL()
+	if err != nil {
+		return "", "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, listTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ui, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("build web UI request: %w", err)
+	}
+	req.Header.Set("Cookie", c.cookies)
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Referer", defaultReferer)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("open web UI: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodyBytes))
+		return "", "", classifyHTTP(resp.StatusCode, string(body), retryAfter(resp))
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxUIBytes+1))
+	if err != nil {
+		return "", "", fmt.Errorf("read web UI: %w", err)
+	}
+	if len(raw) > maxUIBytes {
+		return "", "", fmt.Errorf("web UI response exceeds %d bytes", maxUIBytes)
+	}
+	return parseWebBootstrap(raw)
+}
+
+// webUIURL turns the API base into the inbox URL that bootstraps the web app.
+func (c *Client) webUIURL() (string, error) {
+	u, err := url.Parse(c.baseURL)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("web UI url: invalid base %q", c.baseURL)
+	}
+	u.Path = "/inbox/"
+	u.RawQuery = "wv=1"
+	u.Fragment = ""
+	return u.String(), nil
+}
+
+// parseWebBootstrap extracts the user/short token and address from the page.
+func parseWebBootstrap(html []byte) (token, email string, err error) {
+	m := webBootstrapScript.FindSubmatch(html)
+	if len(m) < 2 {
+		return "", "", errors.New("web UI bootstrap not found")
+	}
+	var cfg webBootstrap
+	if err := json.Unmarshal(m[1], &cfg); err != nil {
+		return "", "", fmt.Errorf("decode web UI bootstrap: %w", err)
+	}
+	for _, entry := range cfg.UserConfig.API {
+		if entry.Method != "/api/v1/user/short" {
+			continue
+		}
+		var body struct {
+			Token string `json:"token"`
+		}
+		if err := json.Unmarshal(entry.Data.Body, &body); err != nil {
+			return "", "", fmt.Errorf("decode user/short body: %w", err)
+		}
+		token = strings.TrimSpace(body.Token)
+		email = strings.TrimSpace(entry.Data.Email)
+		if token == "" {
+			return "", "", errors.New("web UI bootstrap has no token")
+		}
+		return token, email, nil
+	}
+	return "", "", errors.New("web UI bootstrap has no user/short response")
+}
+
+// Probe checks the credentials with the cheapest list call and returns the
+// canonical mailbox address the API resolved them to. The address is empty
+// when the response does not report one.
+func (c *Client) Probe(ctx context.Context) (string, error) {
+	var email string
+	err := retry(ctx, func() error {
+		raw, err := c.getBytes(ctx, "threads/status/smart", listParams("0", 0, 1, OrderDesc), listTimeout, maxJSONBytes)
+		if err != nil {
+			return err
+		}
+		var env envelope
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return fmt.Errorf("decode envelope: %w", err)
+		}
+		if err := classifyEnvelope(env.Status); err != nil {
+			return err
+		}
+		email = strings.TrimSpace(env.Email)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return email, nil
 }
 
 // Folders returns the complete folder tree.
