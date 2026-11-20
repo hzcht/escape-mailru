@@ -113,11 +113,6 @@ func (a *capturedAuth) observe(raw string) {
 			a.onAPI[token] = true
 		}
 	}
-	a.mu.Unlock()
-	if added {
-		logf("capture: access token candidate from %s (%d chars)", host, len(token))
-	}
-	a.mu.Lock()
 	if a.email == "" && mailbox != "" {
 		a.email = mailbox
 	}
@@ -125,6 +120,9 @@ func (a *capturedAuth) observe(raw string) {
 		a.csrfToken = csrf
 	}
 	a.mu.Unlock()
+	if added {
+		logf("capture: access token candidate from %s (%d chars)", host, len(token))
+	}
 }
 
 // requestHost names where a candidate token was observed, for diagnostics.
@@ -335,7 +333,10 @@ func finishCapture(conn *cdp.Conn, auth *capturedAuth, baseURL string, r *bufio.
 			}
 			lastErr = err
 		}
-		if auth.token() != "" && !askedMailbox {
+		// Rank the candidates once per poll; both the mailbox prompt and the
+		// signature check below use the same snapshot.
+		tokens := auth.tokens()
+		if len(tokens) > 0 && !askedMailbox {
 			mailbox = auth.mailbox()
 			if mailbox == "" {
 				fmt.Fprint(out, "Mailbox e-mail (not seen in browser traffic): ")
@@ -351,13 +352,13 @@ func finishCapture(conn *cdp.Conn, auth *capturedAuth, baseURL string, r *bufio.
 		// repeating a check the API has already rejected.
 		signature := ""
 		if askedMailbox && mailbox != "" {
-			signature = strings.Join(auth.tokens(), "\x00")
+			signature = strings.Join(tokens, "\x00")
 		}
 		if signature != "" && (signature != lastSignature || time.Since(lastAttempt) >= validateInterval) {
 			fresh := signature != lastSignature
 			lastSignature = signature
 			lastAttempt = time.Now()
-			captured, err := verifyCaptured(ctx, conn, auth, mailbox, baseURL)
+			captured, err := verifyCaptured(ctx, conn, tokens, auth.csrf(), mailbox, baseURL)
 			if err == nil {
 				return captured, nil
 			}
@@ -408,7 +409,7 @@ func verifyWebCaptured(ctx context.Context, conn *cdp.Conn, baseURL string) (ses
 	verify := mailapi.New(mailapi.Options{
 		Email:        candidate.Email,
 		Token:        candidate.Token,
-		CookieHeader: candidate.CookieHeader(time.Now()),
+		CookieHeader: cookieHeader,
 		BaseURL:      baseURL,
 	})
 	resolved, err := verify.Probe(ctx)
@@ -425,17 +426,17 @@ func verifyWebCaptured(ctx context.Context, conn *cdp.Conn, baseURL string) (ses
 // cookies. The API's answer is authoritative: a session is returned only when
 // it can actually list folders, and its canonical address is used when the API
 // reports one.
-func verifyCaptured(ctx context.Context, conn *cdp.Conn, auth *capturedAuth, mailbox, baseURL string) (session.Session, error) {
+func verifyCaptured(ctx context.Context, conn *cdp.Conn, tokens []string, csrf, mailbox, baseURL string) (session.Session, error) {
 	cookies, err := browserCookies(ctx, conn)
 	if err != nil {
 		return session.Session{}, err
 	}
 	var lastErr error
-	for _, token := range auth.tokens() {
+	for _, token := range tokens {
 		candidate := session.Session{
 			Email:       mailbox,
 			AccessToken: token,
-			CSRFToken:   auth.csrf(),
+			CSRFToken:   csrf,
 			Cookies:     cookies,
 		}
 		if err := session.Validate(candidate); err != nil {
