@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # migrate_to_imap.py
-# Миграция почты с локальных .eml файлов на IMAP-сервер.
+# Upload local .eml files to an IMAP mailbox.
 #
-# Использование:
+# Usage:
 #   python migrate_to_imap.py --config config.json
 #
-# Или с передачей параметров командной строки:
-#   python migrate_to_imap.py --server imap.example.com --port 993 --login user@example.com --password --folder C:\mail-export\user@mail_ru_hosted_domain\Inbox
+# Or with CLI arguments:
+#   python migrate_to_imap.py --server imap.example.com --port 993 --login user@example.com --password "<password>" --folder "C:\path\to\exported-mail\Inbox"
 #
-# Требуется: Python 3 standard library (imaplib, email, os, argparse).
-# Примечание: для SMTP-сервера или другого порта может потребоваться adjustment.
+# Requires: Python 3 standard library (imaplib, email, argparse, json, pathlib, etc.).
 
 import argparse
 import imaplib

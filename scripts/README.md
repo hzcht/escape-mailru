@@ -1,107 +1,66 @@
-# Скрипты миграции почты
+# Mail migration helpers
 
-## migrate_to_imap.py
+## `migrate_to_imap.py`
 
-Скрипт для переноса локальных `.eml` файлов на IMAP-сервер с использованием стандартной библиотеки Python (все модули входят в состав Python 3, дополнительные пакеты не требуются).
+Uploads local `.eml` files to an IMAP mailbox using only the Python standard library.
 
-### Особенности
+### Requirements
 
-- **Поддержка SSL (port 993) и нешифрованного соединения (port 143)**
-- **Автоматический парсинг заголовков и тела письма** из `.eml` файлов
-- **Итеративная загрузка** с отслеживаемым прогрессом и обработкой ошибок
-- **Гибкая конфигурация** через JSON-файл или аргументы командной строки
-- **Resume-safe behavior**: пропускает поврежденные файлы, продолжает с следующего
+- Python 3
+- Access to an IMAP server (SSL or plain connection)
+- Valid mailbox credentials
 
-### Требования
+### Configuration
 
-- Python 3 (используются только модули стандартной библиотеки: `imaplib`, `email`, `os`, `argparse`, `json`, `time`, `pathlib`)
-- Доступ к IMAP-серверу (порт 993 SSL или 143 plain)
-- Логин и пароль для авторизации на сервере
+You can provide settings via a JSON config file, command-line arguments, or a mix of both (CLI arguments override config values).
 
-### Файлы в этом каталоге
-
-- `migrate_to_imap.py` — основной скрипт миграции
-- `config.json` — пример конфигурации (не храните реальные пароли в репозиторий!)
-- `README.md` — эту документацию
-
-### Конфигурация
-
-Создайте файл `scripts/config.json` с следующими полями:
+Example `config.json`:
 
 ```json
 {
   "server": "imap.example.com",
   "port": 993,
   "login": "user@example.com",
-  "password": "your_password",
-  "eml_folder": "C:\\path\\to\\eml"
+  "password": "<password>",
+  "eml_folder": "C:\\path\\to\\exported-mail"
 }
 ```
 
-Или передавайте параметры напрямую через командную строку (см. ниже).
+Do not store real credentials in version-controlled files.
 
-### Запуск
+### Usage
 
-**С конфигурационным файлом:**
+From the `scripts` directory:
 
 ```powershell
-cd C:\path\to\mexporter\scripts
+# Using a config file
 python migrate_to_imap.py --config config.json
+
+# Using CLI arguments
+python migrate_to_imap.py --server imap.example.com --port 993 --login user@example.com --password "<password>" --folder "C:\path\to\exported-mail"
 ```
 
-**С аргументами командной строки:**
+### Common arguments
 
-```powershell
-python migrate_to_imap.py --server imap.example.com --port 993 --login user@example.com --password "your_password" --folder "C:\path\to\eml"
-```
+| Argument | Description |
+| --- | --- |
+| `--config` | Path to JSON configuration file |
+| `--server` | IMAP server hostname |
+| `--port` | IMAP port (typically `993` for SSL, `143` for plain) |
+| `--login` | Mailbox login/username |
+| `--password` | Mailbox password (prefer secure input/storage practices) |
+| `--folder` | Directory containing `.eml` files (scanned recursively) |
+| `--ssl` / `--no-ssl` | Force SSL/TLS on or off |
 
-**С миксом конфига и аргументов:**
+### Behavior
 
-Аргументы командной строки переопределят значения из config.json. Если аргумент не указан — берется значение из config.json (или prompt для пароля).
+- Scans the target folder recursively for `.eml` files.
+- Parses each file and appends it to the target IMAP mailbox.
+- Logs progress and continues when individual files fail.
+- Prints a summary of successes, failures, and skipped files.
 
-### Доступные аргументы
+### Notes
 
-| Аргумент | По умолчанию | Описание |
-|----------|-------------|----------|
-| `--config` | — | Путь к JSON-файлу конфигурации |
-| `--server` | `imap.example.com` | IMAP сервер |
-| `--port` | `993` | Порт IMAP (993 для SSL, 143 для plain) |
-| `--login` | `""` | Email логин (из config если не указан) |
-| `--password` | `""` | Пароль (из config, prompt или env var) |
-| `--folder` | `""` | Папка с .eml файлами (текущая папка скрипта по умолчанию) |
-| `--ssl` | — | Явно использовать SSL/TLS (порт 993) |
-| `--no-ssl` | — | Использовать нешифрованное соединение (порт 143) |
-
-### Как это работает
-
-1. Скрипт загружает конфигурацию из `config.json` или аргументов командной строки
-2. Подключается к указанному IMAP-серверу (SSL или plain в зависимости от порта)
-3. Авторизуется с указанным логином и паролем
-4. Рекурсивно сканирует папку с `.eml` файлами
-5. Для каждого файла:
-   - Парсит заголовки (Subject, From, Date, Message-ID) и тело (text/plain)
-   - Отправляет письмо на сервер через IMAP APPEND
-   - Логирует успех/ошибку
-6. Выводит итоговую статистику и закрывает соединение
-
-### Обработка ошибок
-
-- Если `.eml` файл нельзя прочитать — он пропускается с логированием ошибки
-- Если IMAP APPEND удаленная — ошибка логируется, скрипт продолжает с다음 файлом
-- В конце выводится статистика: успешно/ошибок/пропущено
-
-### Возможные проблемы
-
-- **Сложные многокомпонентные письма**: скрипт извлекает `text/plain` часть. Если в письме только `text/html`, тело может быть пустым.
-- **Кодировка**: скрипт пытается определить кодировку автоматически. Для русских Subject/Body может потребоваться настройка локали вашей консоли.
-- **Флгасы прочитанного**: по умолчанию ставится `\Seen`. Можно изменить в коде функции `upload_message`.
-- **Лимит скорости IMAP**: если сервер ограничивает количество операций в минуте, можно увеличить `time.sleep(0.1)` в коде.
-- **Пароль в config.json**: не рекомендуется хранить реальные пароли в файле конфигурации под версионным контролем. Используйте аргументы `--password` или环境变量 при необходимости.
-
-### Лицензия
-
-Бесплатный инструмент для личного использования. Автор не несет ответственности за потерю данных — всегда делайте резервные копии перед миграцией.
-
-### Примечание про Go реализацию
-
-Первоначальная реализация на Go (`github.com/emersion/go-imap`) столкнулась с проблемами совместимости библиотеки с Go 1.27 — функциями `Dial`, `DialTLS` и типом `Client` не удается получить доступ через ожидаемый API в версии v1.2.1. Рекомендуется использовать Python-скрипт, который работает со стандартной библиотекой без дополнительных зависимостей.
+- Message parsing/upload behavior depends on message structure and server capabilities.
+- For large migrations, consider testing with a small subset first.
+- Keep backups of source `.eml` files before migration.

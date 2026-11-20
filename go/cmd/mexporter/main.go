@@ -2,13 +2,18 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -37,6 +42,8 @@ type cliFlags struct {
 	dryRun      bool
 	verbose     bool
 	noTUI       bool
+	initSession bool
+	loginURL    string
 }
 
 const (
@@ -59,6 +66,11 @@ func run(args []string) int {
 		}
 		logf("FATAL: %v", err)
 		return exitFail
+	}
+	if fl.initSession {
+		if err := bootstrapSession(fl); err != nil {
+			return fail(err)
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -113,6 +125,8 @@ func parseFlags(args []string) (cliFlags, error) {
 	fs.BoolVar(&fl.dryRun, "dry-run", false, "enumerate messages without downloading")
 	fs.BoolVar(&fl.verbose, "v", false, "log every downloaded message")
 	fs.BoolVar(&fl.noTUI, "no-tui", false, "use config folders without the selector")
+	fs.BoolVar(&fl.initSession, "init-session", false, "create or replace the session file via guided manual login/import")
+	fs.StringVar(&fl.loginURL, "login-url", "https://e.mail.ru/", "URL to open in browser during -init-session")
 	if err := fs.Parse(args); err != nil {
 		return cliFlags{}, err
 	}
@@ -282,6 +296,100 @@ func humanBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// bootstrapSession guides manual login and saves a session file.
+func bootstrapSession(fl cliFlags) error {
+	fmt.Fprintln(os.Stderr, "Session setup (mode 0)")
+	fmt.Fprintf(os.Stderr, "Target session file: %s\n", fl.sessionPath)
+	if fl.loginURL != "" {
+		fmt.Fprintf(os.Stderr, "Opening browser: %s\n", fl.loginURL)
+		if err := openBrowser(fl.loginURL); err != nil {
+			logf("could not open browser automatically: %v", err)
+			fmt.Fprintln(os.Stderr, "Open the login URL manually in your browser.")
+		}
+	}
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "1. Sign in to the mailbox in the browser.")
+	fmt.Fprintln(os.Stderr, "2. Export session data as JSON with fields: email, access_token, cookies (and csrf_token if available).")
+	fmt.Fprintln(os.Stderr, "3. Save that JSON to a file, or paste it below.")
+	fmt.Fprintln(os.Stderr)
+
+	s, err := promptSession(os.Stdin, os.Stderr)
+	if err != nil {
+		return err
+	}
+	if err := session.Save(fl.sessionPath, s); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Session saved: %s (account: %s)\n", fl.sessionPath, s.Email)
+	return nil
+}
+
+// promptSession reads session JSON from a file path or pasted stdin.
+func promptSession(in io.Reader, out io.Writer) (session.Session, error) {
+	r := bufio.NewReader(in)
+	fmt.Fprint(out, "Path to session JSON file (leave empty to paste JSON): ")
+	line, err := r.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return session.Session{}, fmt.Errorf("read session input: %w", err)
+	}
+	path := strings.TrimSpace(line)
+	var raw []byte
+	if path != "" {
+		raw, err = os.ReadFile(path)
+		if err != nil {
+			return session.Session{}, fmt.Errorf("read session file: %w", err)
+		}
+	} else {
+		fmt.Fprintln(out, "Paste session JSON, then enter a single '.' on a new line:")
+		var b strings.Builder
+		for {
+			l, e := r.ReadString('\n')
+			if len(l) > 0 {
+				trimmed := strings.TrimRight(l, "\r\n")
+				if trimmed == "." {
+					break
+				}
+				b.WriteString(l)
+			}
+			if e != nil {
+				if errors.Is(e, io.EOF) {
+					break
+				}
+				return session.Session{}, fmt.Errorf("read pasted session JSON: %w", e)
+			}
+		}
+		raw = []byte(strings.TrimSpace(b.String()))
+	}
+	if len(raw) == 0 {
+		return session.Session{}, errors.New("session JSON is empty")
+	}
+	var s session.Session
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return session.Session{}, fmt.Errorf("parse session JSON: %w", err)
+	}
+	if err := session.Validate(s); err != nil {
+		return session.Session{}, err
+	}
+	return s, nil
+}
+
+// openBrowser tries to open a URL in the default browser.
+func openBrowser(url string) error {
+	if strings.TrimSpace(url) == "" {
+		return errors.New("empty URL")
+	}
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	return cmd.Start()
 }
 
 // logf writes a timestamped line to stderr.

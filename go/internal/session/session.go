@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -43,15 +44,64 @@ func Load(path string) (Session, error) {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return s, fmt.Errorf("REQ-EXPORT-010: parse session: %w", err)
 	}
-	switch {
-	case s.Email == "":
-		return s, fmt.Errorf("REQ-EXPORT-010: session email is empty")
-	case s.AccessToken == "":
-		return s, fmt.Errorf("REQ-EXPORT-010: session access_token is empty")
-	case len(s.Cookies) == 0:
-		return s, fmt.Errorf("REQ-EXPORT-010: session cookies are empty")
+	if err := Validate(s); err != nil {
+		return Session{}, err
 	}
 	return s, nil
+}
+
+// Validate reports whether the session has the minimum required fields.
+func Validate(s Session) error {
+	switch {
+	case s.Email == "":
+		return fmt.Errorf("REQ-EXPORT-010: session email is empty")
+	case s.AccessToken == "":
+		return fmt.Errorf("REQ-EXPORT-010: session access_token is empty")
+	case len(s.Cookies) == 0:
+		return fmt.Errorf("REQ-EXPORT-010: session cookies are empty")
+	}
+	return nil
+}
+
+// Save writes the session atomically with restrictive permissions.
+//
+// REQ-EXPORT-010: the session contains secrets and is only stored at the requested path.
+func Save(path string, s Session) error {
+	if err := Validate(s); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("REQ-EXPORT-010: create session dir: %w", err)
+	}
+	raw, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return fmt.Errorf("REQ-EXPORT-010: encode session: %w", err)
+	}
+	raw = append(raw, '\n')
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".session-*.tmp")
+	if err != nil {
+		return fmt.Errorf("REQ-EXPORT-010: create session temp: %w", err)
+	}
+	name := tmp.Name()
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return fmt.Errorf("REQ-EXPORT-010: chmod session temp: %w", err)
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return fmt.Errorf("REQ-EXPORT-010: write session: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return fmt.Errorf("REQ-EXPORT-010: close session: %w", err)
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return fmt.Errorf("REQ-EXPORT-010: replace session: %w", err)
+	}
+	return nil
 }
 
 // CookieHeader renders the Cookie request header at the given time.

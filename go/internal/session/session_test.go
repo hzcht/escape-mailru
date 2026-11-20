@@ -71,3 +71,27 @@ func TestCookieHeader(t *testing.T) {
 		t.Fatalf("cookie header = %q, want %q", got, want)
 	}
 }
+
+func TestValidate(t *testing.T) {
+	if err := Validate(Session{}); err == nil {
+		t.Fatal("expected error for empty session")
+	}
+	if err := Validate(Session{Email: "u", AccessToken: "t", Cookies: []Cookie{{Name: "s"}}}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestSaveAndLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "session.json")
+	in := Session{Email: "user@example.com", AccessToken: "t", CSRFToken: "c", Cookies: []Cookie{{Name: "s", Value: "1", Domain: ".mail.ru"}}}
+	if err := Save(path, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Email != in.Email || out.AccessToken != in.AccessToken || out.CSRFToken != in.CSRFToken || len(out.Cookies) != 1 {
+		t.Fatalf("loaded = %+v", out)
+	}
+}

@@ -1,153 +1,87 @@
-# Architecture — mexporter (Mail.ru / VK WorkSpace exporter)
+# Architecture
 
 ## Overview
 
-One-off web API exporter: captures Mail.ru/VK WorkSpace mailbox to `.eml` files via the public web API. Playwright (injected MCP) captures session cookies on first run; the Go tool uses those cookies to enumerate and download messages.
+`mexporter` is a Go CLI application that exports mailbox messages to local `.eml` files using a read-only web API workflow. It emphasizes deterministic enumeration, resumability, and safe file/journal handling.
 
-## Directory Structure
+## High-level flow
 
-```
-mexporter/
-  README.md                 # User-facing documentation
-  CHANGELOG.md              # Version history and changes
-  RETROSPECTIVE.md          # Full run history, metrics, limitations
-  run_mexporter.ps1         # Autonomous launcher (no extra runtime needed)
-  .gitignore
-  go/                       # Main Go module (Go 1.27, stdlib only)
-    cmd/mexporter/
-      main.go               # CLI entry, flags, TUI wiring
-    internal/
-      mailapi/              # API client and types
-      layout/               # File naming and folder structure
-      config/               # Config loading
-      tui/                  # Folder selector
-      exporter/             # Export engine (enumerate, download, journal)
-      journal/              # JSONL + JSON snapshot
-  scripts/                  # Utility scripts
-    migrate_to_imap.py      # IMAP migration script (Python stdlib)
-    README.md               # Script documentation
-  session/                  # session.json (cookies + token — SECRET, not in git)
-  mail-export/              # Exported .eml files (not in git)
+```text
+session -> mailapi -> layout -> config/TUI -> journal -> exporter
 ```
 
-## Flow (One-Way Dependency Chain)
+1. **Session**: load and validate authentication material. With `-init-session` (mode 0), the CLI can guide manual browser sign-in and import/save session JSON before continuing.
+2. **Mail API**: list folders, enumerate threads/messages, expand threads, download raw `.eml` data.
+3. **Layout**: map provider folders to local paths and generate safe filenames.
+4. **Config/TUI**: resolve runtime settings and folder selection.
+5. **Journal**: persist per-message state in append-only logs and snapshots.
+6. **Exporter**: coordinate enumeration, filtering/resume checks, parallel downloads, retries, and reporting.
 
-```
-session → mailapi → layout → config/TUI → journal → exporter
-```
+## Directory structure (key parts)
 
-- **session** — File parsing for session.json (cookies, access_token).
-- **mailapi** — HTTP client for Mail.ru/VK API (folders, threads, thread expansion, .eml download). Read-only.
-- **layout** — Generates output paths: `mail-export/<email>/<folder>/<date>_<subject>_<uidl>.eml`.
-- **config/TUI** — Loads `mexporter.json`, shows folder selector, validates input.
-- **journal** — JSONL source of truth + JSON snapshot for fast reads (fast_read package).
-- **exporter** — Orchestrates: enumerate (date asc), worker pool, download, resume logic.
-
-## Key Packages
-
-| Package | Responsibility |
-|---------|---------------|
-| `internal/mailapi` | `Folders()`, `Threads()`, `ThreadExpand()`, `DownloadThread()`. All GET/read only. |
-| `internal/exporter` | `ExportFolder(folderID, ...)` — enumerate, download, write .eml, append to journal. |
-| `internal/journal` | `AppendJSONL(entry)`, `Snapshot()` — fast snapshot for reads. |
-| `internal/layout` | `FileName(date, subject, uidl)` — sanitized filename. `OutputDir(email, folderID)`. |
-| `internal/tui` | Raw Windows console line-based folder selector. |
-| `internal/config` | `Load(path)` — reads `mexporter.json` (email, out_dir, workers, delay, folders). |
-| `session/` | `Load(path)` — reads `session/session.json` (cookies, token). Secret. |
-
-## Data Formats
-
-### Session File (`session/session.json`) — SECRET
-```json
-{
-  "cookies": { "name": "value", ... },
-  "access_token": "eyJ..."
-}
-```
-Treat as secret. Never commit, never log.
-
-### Config File (`mexporter.json`)
-```json
-{
-  "email": "user@mail_ru_hosted_domain",
-  "out_dir": "mail-export/user@mail_ru_hosted_domain",
-  "workers": 4,
-  "delay_ms": 100,
-  "folders": [0, 500000]
-}
+```text
+go/
+  cmd/mexporter/      CLI entrypoint and wiring
+  internal/
+    session/          Session loading/validation
+    mailapi/          API client and response types
+    layout/           Folder tree and output path helpers
+    config/           Config load/save/defaults
+    journal/          JSONL log + JSON snapshot
+    exporter/         Export orchestration and workers
+    tui/              Folder selection UI/fallback
+scripts/              Helper scripts (e.g. IMAP migration)
+docs/                 Project documentation
 ```
 
-### Journal (`export-log.jsonl`) — Append-only
-```json
-{"ts":"2026-11-19T10:00:00Z","thread_id":"abc","date":"2026-11-19","uidl":"xyz","action":"downloaded","file":"Inbox/2026-11-19_Subject_xyz.eml","size":12345}
-{"ts":"2026-11-19T10:00:01Z","thread_id":"abc","date":"2026-11-19","uidl":"xyz","action":"done"}
-```
+## Core components
 
-### Snapshot (`export-log.json`) — Fast Reads
-```json
-{
-  "version": 1,
-  "updated": "2026-11-19T10:00:00Z",
-  "entries": [
-    {"thread_id":"abc","date":"2026-11-19","uidl":"xyz","action":"done","file":"Inbox/2026-11-19_Subject_xyz.eml","size":12345}
-  ]
-}
-```
+### Session
+- Reads session/auth data from a local file.
+- Supports guided bootstrap/import via `-init-session` (open browser for manual sign-in, then import and save session JSON).
+- Supplies credentials/tokens required by API requests.
+- Authentication failures are surfaced to the caller (exit code signaling handled at CLI level).
 
-## Invariants (must always hold)
+### Mail API client
+- Performs read-only requests for folder and message/thread data.
+- Downloads message content without mutating mailbox state.
 
-1. **`date asc` only.** Never `date desc` + offset — loses messages when new mail arrives.
-2. **Identity = uidl.** Never subject or date.
-3. **Read-only.** Only GET/read endpoints. No send/delete/move/settings changes.
-4. **Trust:** `downloaded` journal entries are trusted only if `.eml` file exists and is non-empty; size re-verified at write.
-5. **No inter-process locking.** Don't run two exporter instances on the same output.
-6. **`.eml` bytes untouched.** Filename is the only metadata.
-7. **Idempotent.** Re-running a folder re-enumerates and skips already-downloaded.
+### Layout
+- Builds a local folder structure mirroring mailbox hierarchy.
+- Produces stable, filesystem-safe filenames using message identity and metadata.
 
-## Testing
+### Config and selection
+- Loads runtime configuration and defaults.
+- Supports interactive folder selection and non-interactive modes.
+- Persists selected folders/settings when required by CLI behavior.
+
+### Journal
+- `export-log.jsonl`: append-only event/state log (source of truth).
+- `export-log.json`: snapshot for fast status reads.
+- Supports resume by distinguishing completed, skipped, and failed work.
+
+### Exporter
+- Enumerates messages in ascending date order.
+- Uses a worker pool for downloads with bounded concurrency.
+- Retries transient failures and records outcomes in the journal.
+- Writes files safely and validates downloaded artifacts before marking complete.
+
+## Invariants
+
+- Enumeration order must be ascending by date for long-running exports.
+- Message identity is provider uidl.
+- Only read operations are permitted against the mailbox.
+- Journal/download completion must reflect actual, valid local files.
+- A single output target must not be written by concurrent exporter processes.
+
+## Testing and verification
+
+Typical checks from `go/`:
 
 ```powershell
-cd go
-gofumpt -l .                  # formatting (fallback: gofmt -l .)
-go vet ./...                  # vet
-go test ./...                 # unit tests
-go test -race ./...           # (unavailable here — CGO disabled)
-go test ./internal/exporter -run TestDownload -v   # narrow test
-go test -coverprofile=cover.out ./... && go tool cover -func=cover.out
+gofmt -l .
+go vet ./...
+go test ./...
 ```
 
-## Gotchas
-
-- `-folders` and TUI persist selection to `mexporter.json` **before** export.
-- `-limit N` limits threads, not messages — one thread can yield more than N files.
-- `-delay 0` means "read `delay_ms` from config", not "no delay".
-- `-no-tui` with empty `folders` exits 1.
-- PowerShell prints native stderr as `NativeCommandError` — check `$LASTEXITCODE`.
-- TUI without real console → line fallback. Don't automate it.
-- Set `[Console]::OutputEncoding=[Text.Encoding]::UTF8` before viewing Cyrillic filenames.
-
-## IMAP Migration
-
-The `scripts/migrate_to_imap.py` script migrates exported `.eml` files to an IMAP server (e.g., `imap.example.com`):
-- Uses Python stdlib only (`imaplib`, `email`, `argparse`, `json`, `pathlib`)
-- Supports config file (`scripts/config.json`) or CLI args
-- Supports SSL (993) and plain (143) connections
-- Recursive `.eml` file discovery
-- Progress logging and error handling
-- See `scripts/README.md` for full documentation
-
-## Adding New Features (Development Workflow)
-
-1. **Read existing code** before modifying — understand the patterns
-2. **Run tests** — `go test ./internal/<package>/...` before changes
-3. **Follow Go style** — small functions, comments on exported items, tests for business logic
-4. **Update docs** — README.md, CHANGELOG.md, RETROSPECTIVE.md if significant
-5. **Commit** — only on explicit request from user
-
-## Performance Notes
-
-- Default worker pool: 4 workers
-- Network delay: 100ms between thread downloads
-- Memory: ~200 MB baseline + ~10 MB per concurrent thread
-- Large exports (127k files): ~6.4 GB — monitor disk space
-- Journal operations: append-only, fast snapshot rebuild on demand
+Targeted tests can be used during development for specific packages or scenarios.

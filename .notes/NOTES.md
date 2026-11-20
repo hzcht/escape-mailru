@@ -1,0 +1,5 @@
+- Initial implementation exported mailbox data via direct API calls with resumable journaling.
+- Go implementation organized as `cmd/mexporter` plus internal packages (`session`, `mailapi`, `layout`, `config`, `journal`, `exporter`, `tui`), using the standard library.
+- Key behaviors: ascending enumeration, uidl-based identity, read-only API usage, JSONL journal with snapshot, retries/backoff, and atomic file writes.
+- Legacy source snapshots are stored under `.notes/backup/`.
+- Project documentation was rewritten and example commands/configs were anonymized.

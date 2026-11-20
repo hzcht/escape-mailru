@@ -2,6 +2,6 @@
   "server": "imap.example.com",
   "port": 993,
   "login": "user@example.com",
-  "password": "your_password",
-  "eml_folder": "C:\\path\\to\\eml"
+  "password": "<password>",
+  "eml_folder": "C:\\path\\to\\exported-mail"
 }

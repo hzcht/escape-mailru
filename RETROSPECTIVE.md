@@ -1,95 +1,66 @@
-# Ретроспектива: экспорт почты Mail.ru
+# Retrospective
 
-## Итог
+## Summary
 
-- Экспортировано **127 829 писем**, **6,42 ГБ** (6 891 879 553 байт), **0 ошибок**.
-- 35 папок, из них 9 непустых; структура повторена как `<ящик>/<путь папок>/<дата>_<тема>_<uidl>.eml`.
-- Полный прогон занял ~8 часов при 4 воркерах (~4,5 письма/с), без обхода защиты и без изменения почты.
-- Добор «Входящих» на возрастающей сортировке добавил 4 новых письма; журнал и диск сходятся (127 829 файлов).
+This project evolved from manual/UI-driven mailbox export experiments into a CLI exporter that uses direct API calls, deterministic enumeration, and resumable journaling. The main goals were correctness, resumability, safe read-only operation on large mailboxes, and predictable day-to-day usability.
 
-## Что оказалось главным
+## Key lessons
 
-1. **UI-скачивание непригодно для массы.** Меню «Ещё → Ещё → Скачать на компьютер» отдаёт файл через blob и занимает десятки секунд на письмо. Прямой вызов того же API (`messages/message/download`) отдаёт тот же `.eml` побайтово за 1–2 секунды.
-2. **Сортировка по возрастанию обязательна.** При `date desc` и пагинации по `offset` новые письма, пришедшие во время обхода, сдвигают страницы — ровно так потерялись 9 писем. `date asc` фиксирует уже прочитанные страницы.
-3. **Журнал — источник истины.** JSONL с записью на каждое письмо переживает падение процесса; снимок JSON нужен только для быстрого чтения и отчёта.
-4. **Идентификатор письма — uidl, не тема.** Тема и дата могут совпадать; uidl гарантирует уникальность имени и дедупликацию.
+1. **Direct API downloads scale better than UI automation.** Automating UI actions for each message is too slow and brittle for large exports.
+2. **Ascending enumeration is safer for long runs.** Descending pagination with offsets can miss or duplicate work when new mail arrives during export.
+3. **Stable message identity matters.** Provider uidl is the reliable identifier for deduplication and file naming decisions.
+4. **Journaling enables recovery.** An append-only log plus a snapshot allows resume, retry, and progress inspection after interruptions.
+5. **Read-only guarantees reduce risk.** Restricting operations to listing and downloading avoids accidental mailbox mutations.
 
-## Архитектура
+## Architecture outcomes
 
-```
-cmd/mexporter          — только разбор флагов и сборка зависимостей
-internal/session       — загрузка cookies/access_token, валидация
-internal/mailapi       — HTTP-клиент: папки, страницы, цепочки, download
-internal/layout        — дерево папок, безопасные имена и пути
-internal/config        — mexporter.json, значения по умолчанию, атомарное сохранение
-internal/journal       — JSONL + снимок, статусы, resume
-internal/exporter      — обход, воркеры, повторы, прогресс, манифест
-internal/tui           — выбор папок (raw console на Windows, line-fallback)
-```
+- Clear package boundaries: session/loading, API client, layout, config/UI, journaling, and export orchestration.
+- Worker-based downloading with retry and backoff behavior.
+- Atomic file writes and basic integrity checks before trusting downloaded artifacts.
+- Interactive and non-interactive execution modes.
 
-Только стандартная библиотека, без внешних зависимостей. Экспортируемые сущности снабжены godoc с REQ-тегами; ошибки оборачиваются через `%w`; функции ≤60 строк.
+## Usability and usage scenarios
 
-## Надёжность и возобновление
+### First run (mode 0)
+- Session setup is a guided flow: open the login page, sign in manually, import session JSON, save it, and continue.
+- Required session fields are validated before saving; invalid input fails early with a clear error.
+- The session file is written atomically and treated as secret.
 
-- Атомарная запись: `<файл>.part-*` → `rename`; перед фиксацией проверяются размер и заголовки письма.
-- 3 попытки с backoff 1/3/9 с; `429/503` — пауза 30 с; `401/403` — немедленная остановка с кодом 2.
-- При повторном запуске скачанное пропускается, `failed` повторяется, отсутствующий файл при статусе `downloaded` докачивается.
-- Ctrl+C сохраняет журнал и завершает работу с кодом 130.
+### Daily operation
+- Interactive folder selection is the default; `-folders` and `-no-tui` cover scripted/non-interactive runs.
+- Folder selection is persisted before export, so an interrupted run can be restarted with the same config.
+- `-list` provides a quick, read-only way to inspect folder IDs and message counts.
+- Exit codes distinguish success, usage/runtime errors, expired authentication, and user cancellation.
 
-## TUI и конфиг
+### Safe experimentation
+- `-dry-run -v` allows enumeration checks without downloading files.
+- `-limit N` makes short trial runs practical without changing the overall export plan.
+- Separate `-config` and `-out` paths allow throwaway tests without touching the main export.
 
-`mexporter.exe` без флагов читает список папок и открывает селектор:
+### Resume and recovery
+- Re-running an interrupted export resumes from the journal: completed messages are skipped, failed ones are retried.
+- A `downloaded` record is only trusted when the corresponding file exists and is non-empty.
+- The journal layout (JSONL source of truth plus JSON snapshot) keeps progress inspectable even for large exports.
 
-- `↑/↓`, `PgUp/PgDn`, `Home/End` — навигация; `Space` — выбор;
-- `A` — все, `N` — nothing, `Enter` — начать, `Q`/`Esc` — отмена;
-- выбранные id и email сохраняются в `mexporter.json` **до** старта экспорта;
-- если консоль не поддерживает raw-режим, включается построчный режим: номера папок, `a`, `n`, Enter, `q`.
+### Multiple mailboxes
+- Separate `-session`, `-config`, and `-out` paths per mailbox keep state isolated.
+- A clean start for a new mailbox does not require deleting existing exports, only using fresh paths.
 
-Флаги: `-list`, `-folders 0,23`, `-dry-run`, `-limit N`, `-workers`, `-delay`, `-no-tui`, `-v`.
-`-folders` также фиксируется в конфиге.
+### Troubleshooting
+- Expired authentication is surfaced as exit code `2` with guidance to refresh the session.
+- PowerShell-specific stderr noise is documented so users check exit codes instead of red output.
+- Large export directories are documented as log-inspection targets rather than recursive-scan targets.
 
-## Производительность
+## Operational notes
 
-| Параметр | UI-путь | API-путь |
-|---|---:|---:|
-| Одно письмо | десятки секунд | 1–2 с |
-| Полный экспорт | недели | ~8 ч |
-| Ошибки | таймауты UI | 0 |
+- Session/authentication material expires and must be refreshed (for example via `-init-session`).
+- Very large exports require careful log-based inspection rather than full directory scans.
+- Running concurrent exporter instances against the same output is unsupported.
 
-Узкое место — перечисление больших папок (915 страниц по 50 для «Входящих»), а не скачивание. Задержка 100–150 мс на воркер удерживает нагрузку в разумных пределах.
+## Possible improvements
 
-## Что дал рефакторинг
-
-- 5 файлов в корне `go/` разложены на `cmd` + 7 доменных пакетов.
-- Появились тесты на все пакеты: **86,6%** покрытия, `go vet` чистый.
-- Убрана фильтрация по `RunStarted`: она мешала добору старых писем и больше не нужна при `asc`.
-- TUI отделён от ввода-вывода, поэтому проверяется unit-тестами с fake terminal.
-- Конфиг и выбор папок теперь сохраняются и при `-folders`, а не только после TUI.
-
-## Ограничения
-
-- API недокументирован и может измениться; `access_token` привязан к сессии браузера.
-- Сессия не обновляется автоматически: при 401/403 нужно заново извлечь `session.json`.
-- Windows-консоль проверена unit-тестами; raw-режим зависит от возможностей терминала (есть fallback).
-- Большой JSONL (~127 тыс. строк) читается при старте целиком; для миллионов писем понадобится индекс.
-
-## Дальнейшие шаги
-
-1. Повторная сверка `folders.json` с журналом после добора.
-2. `-verify`: повторная проверка размера/заголовков всех `.eml`.
-3. Адаптивная конкурентность по ответам `429`.
-4. Хелпер обновления сессии из браузера.
-5. Кроссплатформенный raw-терминал (сейчас на не-Windows — line-fallback).
-
-## Запуск
-
-```powershell
-cd C:\path\to\mexporter\go
-go build -o mexporter.exe ./cmd/mexporter
-
-.\mexporter.exe -session ..\session\session.json          # TUI
-.\mexporter.exe -list                                     # дерево папок
-.\mexporter.exe -folders 0 -dry-run -v                    # проверка без скачивания
-.\mexporter.exe -folders 0 -limit 3                       # пробный экспорт
-.\mexporter.exe -no-tui                                   # папки из конфига
-```
+- Verification mode to recheck existing exported files against journal records.
+- Adaptive concurrency/rate handling based on API responses.
+- Faster startup/resume strategies for very large journals.
+- More ergonomic session refresh (fewer manual steps) while keeping credentials local.
+- Richer progress reporting and summary output for long unattended runs.

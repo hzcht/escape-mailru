@@ -1,29 +1,37 @@
 #!/usr/bin/env pwsh
-# Wrapper script to build and run mexporter — a Mail.ru / VK WorkSpace mailbox exporter to .eml.
-# Run from: E:\proj\mexporter
-# On first run it builds go\mexporter.exe if binary is missing.
+# Build and run mexporter from the project directory.
+# If the binary is missing, it is built from ./go.
 
-# Change to script directory
-$here = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
-if (-not $here) { $here = "E:\proj\mexporter" }
-Set-Location $here
+$ErrorActionPreference = 'Stop'
 
-# Build Go binary if needed
-$bin = "go\mexporter.exe"
-if (-not (Test-Path $bin)) {
-    Write-Host "Binary not found, building..." -ForegroundColor Cyan
-    & powershell -NoProfile -Command "Set-Location 'E:\proj\mexporter\go'; go build -o mexporter.exe ./cmd/mexporter"
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Go build failed. Install Go 1.27+ and ensure `go` is on PATH."
-        exit 1
+$root = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
+if (-not $root) {
+    $root = (Get-Location).Path
+}
+Set-Location $root
+
+$bin = Join-Path $root 'go\mexporter.exe'
+
+if (-not (Test-Path -LiteralPath $bin)) {
+    Write-Host 'Binary not found, building...' -ForegroundColor Cyan
+    Push-Location (Join-Path $root 'go')
+    try {
+        & go build -o mexporter.exe ./cmd/mexporter
+        if ($LASTEXITCODE -ne 0) {
+            throw "go build failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        Pop-Location
     }
 }
 
-# Run mexporter with all passed arguments
 if ($args.Count -eq 0) {
     & $bin
 } else {
-    & $bin $args
+    & $bin @args
 }
 
-Write-Host "Done. Exit code: $LASTEXITCODE" -ForegroundColor Yellow
+$exitCode = $LASTEXITCODE
+Write-Host "Done. Exit code: $exitCode" -ForegroundColor Yellow
+exit $exitCode
