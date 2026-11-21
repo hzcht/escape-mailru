@@ -95,6 +95,8 @@ func run(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
+	logf("session: account=%s, cookies=%d (earliest expiry=%s), token=%s, access_token=%s",
+		sess.Email, len(sess.Cookies), earliestCookieExpiry(sess), yesNo(sess.Token), yesNo(sess.AccessToken))
 	if warning := session.ExpiryWarning(sess, time.Now()); warning != "" {
 		logf("session warning: %s", warning)
 	}
@@ -326,10 +328,22 @@ func execute(ctx context.Context, cli *mailapi.Client, nodes []*layout.Node, ids
 	return exitOK
 }
 
-// fail logs an error and maps it to an exit code.
+// fail logs an error and maps it to an exit code. Authentication failures
+// get an actionable hint unless the error already carries one.
 func fail(err error) int {
+	if errors.Is(err, mailapi.ErrAuth) && !hasAuthHint(err) {
+		err = fmt.Errorf("%w; run -refresh-session to renew the web-session token, or -init-session -force if the cookies expired", err)
+	}
 	logf("FATAL: %v", err)
 	return exitFor(err)
+}
+
+// hasAuthHint reports whether err already tells the user how to recover.
+func hasAuthHint(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "-refresh-session") ||
+		strings.Contains(msg, "-init-session") ||
+		strings.Contains(msg, "refresh session")
 }
 
 // exitFor maps an error to the documented process status.
@@ -427,6 +441,52 @@ func humanBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// gateSession checks a fresh session against the API before it is written.
+// An explicit rejection blocks the save; any other failure only warns,
+// because the capture path has just verified the same session.
+func gateSession(fl cliFlags, s session.Session) error {
+	ctx, cancel := context.WithTimeout(context.Background(), sessionVerifyTimeout)
+	defer cancel()
+	cli := mailapi.New(mailapi.Options{
+		Email:        s.Email,
+		AccessToken:  s.AccessToken,
+		Token:        s.Token,
+		CookieHeader: s.CookieHeader(time.Now()),
+		BaseURL:      fl.baseURL,
+	})
+	_, err := cli.Probe(ctx)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, mailapi.ErrAuth) {
+		return fmt.Errorf("the API rejected the session: %w; check the session data or rerun -init-session -force", err)
+	}
+	logf("session check failed (%v); saving without API verification", err)
+	return nil
+}
+
+// yesNo formats optional secret presence for logs without revealing it.
+func yesNo(v string) string {
+	if v == "" {
+		return "no"
+	}
+	return "yes"
+}
+
+// earliestCookieExpiry formats the soonest cookie expiry, or "-" when unknown.
+func earliestCookieExpiry(s session.Session) string {
+	var earliest float64
+	for _, c := range s.Cookies {
+		if c.Expires > 0 && (earliest == 0 || c.Expires < earliest) {
+			earliest = c.Expires
+		}
+	}
+	if earliest == 0 {
+		return "-"
+	}
+	return time.Unix(int64(earliest), 0).Format("2006-01-02")
 }
 
 // runRefreshSession updates the web-session token using the stored cookies.
@@ -557,6 +617,9 @@ func bootstrapSession(fl cliFlags) error {
 			return err
 		}
 	}
+	if err := gateSession(fl, s); err != nil {
+		return err
+	}
 	if err := session.Save(fl.sessionPath, s); err != nil {
 		return err
 	}
@@ -576,7 +639,7 @@ func manualSession(fl cliFlags, r *bufio.Reader) (session.Session, error) {
 	}
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "1. Sign in to the mailbox in the browser.")
-	fmt.Fprintln(os.Stderr, "2. Export session data as JSON with fields: email, access_token, cookies (and csrf_token if available).")
+	fmt.Fprintln(os.Stderr, "2. Export session data as JSON with fields: email, cookies, and token (or access_token for older sessions; add csrf_token if available).")
 	fmt.Fprintln(os.Stderr, "3. Save that JSON to a file, or paste it below.")
 	fmt.Fprintln(os.Stderr)
 	return promptSession(r, os.Stderr)

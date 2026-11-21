@@ -100,6 +100,84 @@ func TestExitFor(t *testing.T) {
 	}
 }
 
+func TestHasAuthHint(t *testing.T) {
+	tests := []struct {
+		err  error
+		want bool
+	}{
+		{fmt.Errorf("load folders: %w", mailapi.ErrAuth), false},
+		{fmt.Errorf("%w; run -refresh-session to renew", mailapi.ErrAuth), true},
+		{fmt.Errorf("%w; run -init-session -force", mailapi.ErrAuth), true},
+		{fmt.Errorf("refresh session: the fetched token was rejected: %w", mailapi.ErrAuth), true},
+		{errors.New("plain"), false},
+	}
+	for _, tt := range tests {
+		if got := hasAuthHint(tt.err); got != tt.want {
+			t.Errorf("hasAuthHint(%v) = %t, want %t", tt.err, got, tt.want)
+		}
+	}
+}
+
+func TestFailMapsAuthToExitCode(t *testing.T) {
+	if code := fail(fmt.Errorf("load folders: %w", mailapi.ErrAuth)); code != exitAuth {
+		t.Fatalf("fail(...) = %d, want %d", code, exitAuth)
+	}
+}
+
+func TestGateSession(t *testing.T) {
+	newServer := func(status int, body string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v1/threads/status/smart" {
+				t.Errorf("unexpected path %s", r.URL.Path)
+			}
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}))
+	}
+	s := session.Session{
+		Email:   "user@example.test",
+		Token:   "web-token",
+		Cookies: []session.Cookie{{Name: "s", Value: "1", Domain: ".mail.ru"}},
+	}
+
+	t.Run("accepted", func(t *testing.T) {
+		srv := newServer(http.StatusOK, `{"status":200,"email":"user@example.test","body":{}}`)
+		defer srv.Close()
+		if err := gateSession(cliFlags{baseURL: srv.URL + "/api/v1"}, s); err != nil {
+			t.Fatalf("gateSession: %v", err)
+		}
+	})
+	t.Run("rejected blocks save", func(t *testing.T) {
+		srv := newServer(http.StatusForbidden, `forbidden`)
+		defer srv.Close()
+		err := gateSession(cliFlags{baseURL: srv.URL + "/api/v1"}, s)
+		if !errors.Is(err, mailapi.ErrAuth) {
+			t.Fatalf("err = %v, want ErrAuth", err)
+		}
+	})
+	t.Run("non-auth failure does not block save", func(t *testing.T) {
+		srv := newServer(http.StatusNotFound, `nope`)
+		defer srv.Close()
+		if err := gateSession(cliFlags{baseURL: srv.URL + "/api/v1"}, s); err != nil {
+			t.Fatalf("gateSession: %v", err)
+		}
+	})
+}
+
+func TestEarliestCookieExpiry(t *testing.T) {
+	if got := earliestCookieExpiry(session.Session{}); got != "-" {
+		t.Fatalf("empty = %q, want -", got)
+	}
+	s := session.Session{Cookies: []session.Cookie{
+		{Expires: float64(time.Date(2026, 12, 1, 12, 0, 0, 0, time.Local).Unix())},
+		{Expires: 0},
+		{Expires: float64(time.Date(2026, 11, 1, 12, 0, 0, 0, time.Local).Unix())},
+	}}
+	if got := earliestCookieExpiry(s); got != "2026-11-01" {
+		t.Fatalf("got %q, want 2026-11-01", got)
+	}
+}
+
 func TestRunRejectsBadFlag(t *testing.T) {
 	if got := run([]string{"-bogus"}); got != exitFail {
 		t.Fatalf("exit = %d", got)

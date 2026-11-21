@@ -22,12 +22,14 @@ import (
 var errCaptureUnavailable = errors.New("automatic session capture is unavailable")
 
 const (
-	targetTimeout    = 20 * time.Second
-	enableTimeout    = 15 * time.Second
-	authWaitTimeout  = 120 * time.Second
-	pollInterval     = 250 * time.Millisecond
-	validateInterval = 5 * time.Second
-	defaultAPIBase   = "https://e.mail.ru/api/v1/"
+	targetTimeout        = 20 * time.Second
+	enableTimeout        = 15 * time.Second
+	authWaitTimeout      = 120 * time.Second
+	pollInterval         = 250 * time.Millisecond
+	validateInterval     = 5 * time.Second
+	heartbeatInterval    = 30 * time.Second
+	sessionVerifyTimeout = 30 * time.Second
+	defaultAPIBase       = "https://e.mail.ru/api/v1/"
 )
 
 // capturedAuth collects credentials from DevTools network events.
@@ -151,6 +153,16 @@ func (a *capturedAuth) hostSummary() string {
 		return "none"
 	}
 	return strings.Join(hosts, ", ")
+}
+
+// hostSource names where a token was observed, for the success log.
+func (a *capturedAuth) hostSource(token string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if host := a.hosts[token]; host != "" {
+		return host
+	}
+	return "unknown source"
 }
 
 // seen reports whether token is already collected. Callers hold a.mu.
@@ -317,6 +329,8 @@ func finishCapture(conn *cdp.Conn, auth *capturedAuth, baseURL string, r *bufio.
 	lastAttempt := time.Time{}
 	lastWebAttempt := time.Time{}
 	lastSignature := ""
+	lastWebErr := ""
+	lastHeartbeat := time.Now()
 	var lastErr error
 
 	for {
@@ -329,7 +343,12 @@ func finishCapture(conn *cdp.Conn, auth *capturedAuth, baseURL string, r *bufio.
 			lastWebAttempt = time.Now()
 			captured, err := verifyWebCaptured(ctx, conn, baseURL)
 			if err == nil {
+				logf("capture: session verified via web bootstrap")
 				return captured, nil
+			}
+			if msg := err.Error(); msg != lastWebErr {
+				lastWebErr = msg
+				logf("capture: web session check failed: %v (retrying)", err)
 			}
 			lastErr = err
 		}
@@ -360,12 +379,17 @@ func finishCapture(conn *cdp.Conn, auth *capturedAuth, baseURL string, r *bufio.
 			lastAttempt = time.Now()
 			captured, err := verifyCaptured(ctx, conn, tokens, auth.csrf(), mailbox, baseURL)
 			if err == nil {
+				logf("capture: session verified via sniffed token (%s)", auth.hostSource(captured.AccessToken))
 				return captured, nil
 			}
 			lastErr = err
 			if fresh {
 				logf("capture: token candidate rejected (%v), still waiting for the signed-in one", err)
 			}
+		}
+		if time.Since(lastHeartbeat) >= heartbeatInterval {
+			lastHeartbeat = time.Now()
+			logf("capture: still waiting for the signed-in mailbox (%s left)", time.Until(deadline).Round(time.Second))
 		}
 		select {
 		case <-ctx.Done():
