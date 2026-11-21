@@ -1,44 +1,44 @@
-# Changelog
+# История изменений
 
-## Unreleased
+## Не выпущено
 
-### Added
-- `-refresh-session` refreshes the web-session `token` from the mail UI bootstrap using the stored cookies, without opening a browser.
-- Session files accept the current web-session `token` field (sent as the `token` query parameter next to the cookies) in addition to the older `access_token`.
-- Session bootstrap mode (`-init-session`, mode 0): open the browser for sign-in, capture the session automatically (manual session JSON import as fallback), save the session file, and continue. Existing session files require `-force`.
-- Automatic session capture through a debuggable Chrome/Edge window during `-init-session`: the app reads cookies, the e-mail address and token candidates from the browser's own traffic (every open tab is watched) and falls back to manual JSON import when the browser cannot be driven.
-- Offline integrity check (`-verify`, `-verify-hash`) comparing journal records with files, including optional SHA-256.
-- Machine-readable output (`-json`) for folder lists, export summaries, and verify reports.
-- Exact `-limit` semantics: the run attempts at most N messages.
-- Partial-export reporting and `-allow-partial`; partial runs exit 1 by default.
-- Per-account export lock with stale-lock handling and `-force`.
-- API base URL override (`-base-url`).
-- Retry/backoff in the API client with `Retry-After` support, response-size checks, and error-body capture.
-- Streaming enumeration into the worker pool, folder summaries, SHA-256 journal fields, and size-aware resume checks.
-- Session validation for VK/WorkSpace cookie domains and expiring-cookie warnings.
-- Folder-ID validation, JSON output, and guided session replacement safeguards.
+### Добавлено
+- `-refresh-session` обновляет веб-токен сессии `token` из загрузочной страницы интерфейса почты по сохранённым cookie, без открытия браузера.
+- Файлы сессии принимают текущее поле веб-токена `token` (передаётся query-параметром `token` рядом с cookie) в дополнение к более старому `access_token`.
+- Режим настройки сессии (`-init-session`, режим 0): открыть браузер для входа, автоматически захватить сессию (ручной импорт JSON сессии — запасной вариант), сохранить файл сессии и продолжить. Для существующих файлов сессии требуется `-force`.
+- Автоматический захват сессии через окно Chrome/Edge в режиме отладки при `-init-session`: программа читает cookie, адрес почты и кандидатов в токены из трафика самого браузера (наблюдает за всеми открытыми вкладками) и переходит к ручному импорту JSON, если браузером нельзя управлять.
+- Офлайн-проверка целостности (`-verify`, `-verify-hash`): сверка записей журнала с файлами, включая необязательный SHA-256.
+- Машиночитаемый вывод (`-json`) для списка папок, итогов экспорта и отчётов проверки.
+- Точная семантика `-limit`: за запуск обрабатывается не более N писем.
+- Отчёт о частичном экспорте и `-allow-partial`: частичные запуски по умолчанию завершаются кодом 1.
+- Блокировка экспорта на аккаунт с обработкой устаревших блокировок и `-force`.
+- Переопределение базового URL API (`-base-url`).
+- Повторы с задержкой в API-клиенте с поддержкой `Retry-After`, проверка размера ответа и сохранение тела ошибок.
+- Потоковое перечисление в пул воркеров, итоги по папкам, поля SHA-256 в журнале и проверки докачки с учётом размера.
+- Проверка доменов cookie VK/WorkSpace и предупреждения об истекающих cookie.
+- Проверка ID папок, вывод JSON и защита при пошаговой замене сессии.
 
-### Changed
-- Automatic session capture now prefers the token the mail UI embeds into its inbox bootstrap (cookie-based sessions authorize with `token`, not `access_token`); it still watches every browser tab, ranks any sniffed tokens (signed-in before guest `anonym.` tokens, newest first), checks candidates against the API with fresh cookies, and falls back to manual import instead of saving a session the API rejects. The wait after sign-in is two minutes, and candidate sources are logged without token values.
-- `-limit` now counts attempted messages rather than threads; `-delay` accepts Go durations.
-- Thread expansion failures and truncation are reported instead of silently falling back.
-- Journal loading keeps snapshot entries when JSONL is empty or corrupt.
-- Rewrote project documentation for clarity and neutrality.
-- Anonymized example commands, paths, and account identifiers in docs and helper scripts.
-- Removed environment-specific references from project documentation and notes.
+### Изменено
+- Автоматический захват сессии теперь предпочитает токен, который интерфейс почты встраивает в загрузочную страницу входящих (сессии на cookie авторизуются через `token`, а не `access_token`); по-прежнему наблюдает за всеми вкладками браузера, упорядочивает найденные токены (вошедшие — раньше гостевых `anonym.`, новые — раньше старых), проверяет кандидатов через API со свежими cookie и переходит к ручному импорту вместо сохранения сессии, которую API отвергает. Ожидание после входа — две минуты; источники кандидатов логируются без значений токенов.
+- `-limit` теперь считает обрабатываемые письма, а не цепочки; `-delay` принимает длительности Go.
+- Ошибки развёртывания цепочек и усечение отчёта сообщаются, а не тихо подменяются запасным вариантом.
+- Загрузка журнала сохраняет записи снимка, когда JSONL пуст или повреждён.
+- Документация проекта переписана для ясности и нейтральности.
+- Примеры команд, путей и идентификаторов аккаунтов в документации и вспомогательных скриптах анонимизированы.
+- Из документации и заметок убраны ссылки на конкретное окружение.
 
-## Earlier milestones (summary)
+## Ранние вехи (кратко)
 
-### Export engine
-- Implemented read-only mailbox export to local `.eml` files via web API access.
-- Added folder discovery, selective export, dry-run enumeration, and resumable operation.
-- Added worker-based downloads, retry/backoff handling, and append-only journaling with snapshots.
+### Движок экспорта
+- Реализован экспорт почтового ящика только для чтения в локальные файлы `.eml` через веб-API.
+- Добавлены обнаружение папок, выборочный экспорт, пробное перечисление и докачка.
+- Добавлены загрузка на воркерах, повторы с задержкой и журнал, дописываемый только в конец, со снимками.
 
-### Usability
-- Added interactive folder selection with fallback for non-interactive environments.
-- Added configuration persistence for selected folders and runtime options.
+### Удобство использования
+- Добавлен интерактивный выбор папок с запасным режимом для неинтерактивного окружения.
+- Добавлено сохранение выбранных папок и параметров запуска в конфигурации.
 
-### Migration utilities
-- Added a Python standard-library script for uploading exported `.eml` files to an IMAP server.
+### Утилиты миграции
+- Добавлен скрипт на стандартной библиотеке Python для загрузки экспортированных `.eml` на IMAP-сервер.
 
-> Historical run-specific metrics and account details were intentionally removed from this changelog to keep documentation generic.
+> Исторические метрики запусков и данные аккаунтов намеренно удалены из этой истории изменений, чтобы документация оставалась универсальной.

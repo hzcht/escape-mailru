@@ -1,68 +1,68 @@
-# Retrospective
+# Ретроспектива
 
-## Summary
+## Итог
 
-This project evolved from manual/UI-driven mailbox export experiments into a CLI exporter that uses direct API calls, deterministic enumeration, and resumable journaling. The main goals were correctness, resumability, safe read-only operation on large mailboxes, and predictable day-to-day usability.
+Проект вырос из ручных экспериментов с экспортом через интерфейс почты в CLI-экспортёр, использующий прямые вызовы API, детерминированное перечисление и журнал с докачкой. Главные цели — корректность, докачка, безопасная работа только для чтения с большими ящиками и предсказуемое повседневное использование.
 
-## Key lessons
+## Ключевые выводы
 
-1. **Direct API downloads scale better than UI automation.** Automating UI actions for each message is too slow and brittle for large exports.
-2. **Ascending enumeration is safer for long runs.** Descending pagination with offsets can miss or duplicate work when new mail arrives during export.
-3. **Stable message identity matters.** Provider uidl is the reliable identifier for deduplication and file naming decisions.
-4. **Journaling enables recovery.** An append-only log plus a snapshot allows resume, retry, and progress inspection after interruptions.
-5. **Read-only guarantees reduce risk.** Restricting operations to listing and downloading avoids accidental mailbox mutations.
+1. **Прямые загрузки через API масштабируются лучше автоматизации интерфейса.** Автоматизировать действия UI для каждого письма слишком медленно и хрупко для больших экспортов.
+2. **Перечисление по возрастанию безопаснее для длительных запусков.** Пагинация по убыванию со смещениями может пропускать или дублировать работу, когда во время экспорта приходит новая почта.
+3. **Стабильная идентичность письма важна.** uidl провайдера — надёжный идентификатор для дедупликации и решений об именах файлов.
+4. **Журналирование даёт восстановление.** Журнал, дописываемый только в конец, плюс снимок позволяют продолжать, повторять и проверять прогресс после прерываний.
+5. **Гарантии только для чтения снижают риск.** Ограничение операций списком и загрузкой исключает случайные изменения ящика.
 
-## Architecture outcomes
+## Архитектурные итоги
 
-- Clear package boundaries: session/loading, API client, layout, config/UI, journaling, and export orchestration.
-- Worker-based downloading with retry and backoff behavior.
-- Atomic file writes and basic integrity checks before trusting downloaded artifacts.
-- Interactive and non-interactive execution modes.
+- Чёткие границы пакетов: загрузка сессии, API-клиент, раскладка, конфиг/UI, журналирование и оркестрация экспорта.
+- Загрузка на воркерах с повторами и задержками.
+- Атомарная запись файлов и базовые проверки целостности перед доверием скачанным артефактам.
+- Интерактивный и неинтерактивный режимы работы.
 
-## Usability and usage scenarios
+## Удобство и сценарии использования
 
-### First run (mode 0)
-- Session setup is a guided flow: open the login page, sign in, capture cookies and the web-session token automatically (manual session JSON import as a fallback), save the session file, and continue.
-- Required session fields are validated before saving; invalid input fails early with a clear error.
-- The session file is written atomically and treated as secret.
+### Первый запуск (режим 0)
+- Настройка сессии — пошаговый процесс: открыть страницу входа, войти, автоматически захватить cookie и веб-токен сессии (ручной импорт JSON — запасной вариант), сохранить файл сессии и продолжить.
+- Обязательные поля сессии проверяются до сохранения; неверные данные отклоняются сразу с понятной ошибкой.
+- Файл сессии записывается атомарно и считается секретом.
 
-### Daily operation
-- Interactive folder selection is the default; `-folders` and `-no-tui` cover scripted/non-interactive runs.
-- Folder selection is persisted before export, so an interrupted run can be restarted with the same config.
-- `-list` provides a quick, read-only way to inspect folder IDs and message counts; `-json` makes it script-friendly.
-- Exit codes distinguish success, usage/runtime errors, expired authentication, and user cancellation (including the interactive selector).
-- A partial result (failed folder, failed thread, truncated enumeration) is reported clearly and exits 1 unless `-allow-partial` is set.
+### Повседневная работа
+- По умолчанию используется интерактивный выбор папок; `-folders` и `-no-tui` покрывают скриптовые и неинтерактивные запуски.
+- Выбор папок сохраняется до экспорта, поэтому прерванный запуск можно продолжить с тем же конфигом.
+- `-list` — быстрый способ только для чтения посмотреть ID папок и число писем; `-json` удобен для скриптов.
+- Коды выхода различают успех, ошибки использования/выполнения, истёкшую авторизацию и отмену пользователем (включая интерактивный выбор).
+- Частичный результат (упавшая папка, упавшая цепочка, усечённое перечисление) явно сообщается и завершается кодом 1, если не передан `-allow-partial`.
 
-### Safe experimentation
-- `-dry-run -v` allows enumeration checks without downloading files.
-- `-limit N` makes short trial runs practical by capping attempted messages without changing the overall export plan.
-- Separate `-config` and `-out` paths allow throwaway tests without touching the main export.
-- An offline `-verify` pass checks that journal records still match files; `-verify-hash` adds SHA-256 comparison when hashes are available.
+### Безопасные эксперименты
+- `-dry-run -v` проверяет перечисление без скачивания файлов.
+- `-limit N` делает короткие пробные запуски практичными, ограничивая обрабатываемые письма без изменения общего плана экспорта.
+- Отдельные пути `-config` и `-out` позволяют проводить одноразовые тесты, не трогая основной экспорт.
+- Офлайн-проход `-verify` проверяет, что записи журнала по-прежнему совпадают с файлами; `-verify-hash` добавляет сравнение SHA-256, когда хеши доступны.
 
-### Resume and recovery
-- Re-running an interrupted export resumes from the journal: completed messages are skipped, failed ones are retried.
-- A `downloaded` record is only trusted when the corresponding file exists, is non-empty, and matches the recorded size.
-- The journal layout (JSONL source of truth plus JSON snapshot) keeps progress inspectable even for large exports, and an empty/corrupt JSONL no longer erases a valid snapshot.
+### Докачка и восстановление
+- Повторный запуск прерванного экспорта продолжает по журналу: готовые письма пропускаются, неудачные повторяются.
+- Запись `downloaded` считается действительной, только если файл существует, не пуст и совпадает с записанным размером.
+- Устройство журнала (JSONL — источник истины, плюс снимок JSON) сохраняет прогресс доступным для осмотра даже в больших экспортах, а пустой или повреждённый JSONL больше не стирает действительный снимок.
 
-### Multiple mailboxes
-- Separate `-session`, `-config`, and `-out` paths per mailbox keep state isolated.
-- A clean start for a new mailbox does not require deleting existing exports, only using fresh paths.
+### Несколько ящиков
+- Отдельные пути `-session`, `-config` и `-out` для каждого ящика изолируют состояние.
+- Чистый старт для нового ящика не требует удаления существующих экспортов — достаточно новых путей.
 
-### Troubleshooting
-- Expired authentication is surfaced as exit code `2` with guidance to refresh the session.
-- PowerShell-specific stderr noise is documented so users check exit codes instead of red output.
-- Large export directories are documented as log-inspection targets rather than recursive-scan targets.
+### Диагностика проблем
+- Истёкшая авторизация выражается кодом выхода `2` с подсказкой обновить сессию.
+- Описаны особенности stderr в PowerShell, чтобы пользователи проверяли коды выхода вместо красного вывода.
+- Большие каталоги экспорта описаны как цель для просмотра журналов, а не рекурсивного сканирования.
 
-## Operational notes
+## Эксплуатационные заметки
 
-- Session/authentication material expires and must be refreshed (for example via `-refresh-session`, or a full re-login with `-init-session -force`).
-- Very large exports require careful log-based inspection rather than full directory scans.
-- Concurrent exporter instances against the same account directory are blocked by a lock file; stale locks age out and `-force` removes them.
-- API rate limits and transient failures are retried with backoff and `Retry-After` hints; permanent client errors are not retried.
+- Данные сессии и авторизации истекают и требуют обновления (например, через `-refresh-session` или полный повторный вход с `-init-session -force`).
+- Очень большие экспорты требуют аккуратной инспекции по журналам, а не полного сканирования каталогов.
+- Параллельные экземпляры экспортёра с одним каталогом аккаунта блокируются lock-файлом; устаревшие блокировки истекают, а `-force` снимает их.
+- Ограничения частоты API и временные сбои повторяются с задержкой и подсказками `Retry-After`; постоянные клиентские ошибки не повторяются.
 
-## Possible improvements
+## Возможные улучшения
 
-- Adaptive concurrency/rate handling based on API responses.
-- Faster startup/resume strategies for very large journals.
-- More ergonomic session refresh (fewer manual steps) while keeping credentials local.
-- Richer progress reporting and summary output for long unattended runs.
+- Адаптивная параллельность и обработка ограничений частоты по ответам API.
+- Более быстрый старт и докачка для очень больших журналов.
+- Более удобное обновление сессии (меньше ручных шагов) при сохранении учётных данных локально.
+- Более богатый отчёт о прогрессе и итогах для длительных запусков без присмотра.

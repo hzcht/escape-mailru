@@ -1,19 +1,35 @@
-# mexporter
+# mexporter — Mail.ru / VK WorkSpace mailbox exporter
 
-`mexporter` exports mailbox messages to local `.eml` files using a web API workflow. It is designed for one-way, read-only mailbox export and resumable downloads.
+## Why this tool exists / Зачем этот инструмент
 
-## Features
+**RU**
 
-- Read-only export (no send/delete/move operations)
-- Folder listing and selective export
-- Interactive folder selection (with non-interactive fallback)
-- Dry-run enumeration mode
-- Parallel downloads with configurable workers and delay
-- Append-only journal and snapshot for resume/retry safety
-- Offline integrity check (`-verify`, optional SHA-256 with `-verify-hash`)
-- Machine-readable summaries (`-json`)
-- Single-instance lock per account output directory
-- Deterministic local file layout per account/folder
+Внезапно Mail.ru сделал две неприятные вещи: заблокировал доступ к почте по POP3 и IMAP, сделав его платным, и поднял в разы тарифы для тех, кто хостит почту у него. В итоге почта у регистратора домена или на VPS стала дешёвым решением. Встал вопрос: как вытянуть всю почту? Этот набор решает задачу — он скачивает письма из выбранных папок локально и позволяет загрузить их на новый IMAP-сервер.
+
+**EN**
+
+Mail.ru suddenly did two unpleasant things: it blocked POP3 and IMAP access to mail by making it paid, and raised tariffs several-fold for those hosting mail with them. As a result, mail at a domain registrar or on a VPS became a cheap solution. The question arose: how to pull out all the mail? This toolkit solves that — it downloads messages from selected folders locally and lets you upload them to a new IMAP server.
+
+Export your Mail.ru / VK WorkSpace email to local `.eml` files. No IMAP/POP3 needed — the exporter uses the public web API and captures the browser session automatically.
+
+`mexporter` экспортирует письма из почтового ящика в локальные файлы `.eml` через веб-API. Инструмент рассчитан на односторонний экспорт только для чтения и докачку после прерывания.
+
+> **Status (21.11.2026):** экспорт работает end-to-end: сессия захватывается автоматически из браузера и проверяется через API перед сохранением, веб-токен обновляется через `-refresh-session`; `gofmt`, `go vet` и `go test ./...` чистые; готовые сборки для Windows x64 и Linux x64 собираются скриптом `scripts/package-release.ps1`.
+
+> **IMAP Migration:** После экспорта файлов `.eml` их можно загрузить на IMAP-сервер через [scripts/migrate_to_imap.py](scripts/README.md).
+
+## Возможности
+
+- Экспорт только для чтения (без отправки, удаления и перемещения писем)
+- Список папок и выборочный экспорт
+- Интерактивный выбор папок (с запасным неинтерактивным режимом)
+- Пробный запуск без скачивания
+- Параллельная загрузка с настраиваемым числом воркеров и задержкой
+- Журнал, дописываемый только в конец, и снимок — для безопасной докачки и повторов
+- Офлайн-проверка целостности (`-verify`, при необходимости SHA-256 через `-verify-hash`)
+- Машиночитаемые отчёты (`-json`)
+- Блокировка на один экземпляр для выходного каталога аккаунта
+- Предсказуемая раскладка файлов по аккаунту и папке
 
 ## Быстрый старт (для новичка)
 
@@ -21,8 +37,8 @@
 
 ### Шаг 1. Скачайте и распакуйте архив
 
-- **Windows**: скачайте `mexporter-windows-x64.zip`, распакуйте в простую папку, например `C:\mexporter`.
-- **Linux**: скачайте `mexporter-linux-x64.tar.gz`, распакуйте командой `tar -xzf mexporter-linux-x64.tar.gz` и сделайте бинарник исполняемым: `chmod +x mexporter`.
+- **Windows**: скачайте `mexporter-v1.0.0-windows-x64.zip` (номер версии в имени может отличаться), распакуйте в простую папку, например `C:\mexporter`.
+- **Linux**: скачайте `mexporter-v1.0.0-linux-x64.tar.gz`, распакуйте командой `tar -xzf mexporter-v1.0.0-linux-x64.tar.gz` и сделайте бинарник исполняемым: `chmod +x mexporter`.
 
 Внутри архива:
 
@@ -76,12 +92,12 @@ mexporter.exe
 
 Дальше — справка для остальных сценариев (запуск из исходников, справка по флагам, работа со скриптами).
 
-## Requirements
+## Требования
 
-- A prebuilt binary from the GitHub Releases page (no Go needed), or Go 1.27 or newer to build from source
-- A valid session file with authentication data for the target mailbox (create one with `-init-session`, see «Быстрый старт» above)
+- Готовый бинарник со страницы GitHub Releases (Go не нужен) либо Go 1.27 или новее для сборки из исходников
+- Действующий файл сессии с данными входа в целевой почтовый ящик (создаётся командой `-init-session`, см. «Быстрый старт» выше)
 
-## Build
+## Сборка
 
 ```powershell
 cd go
@@ -89,123 +105,123 @@ go build -o mexporter.exe ./cmd/mexporter
 cd ..
 ```
 
-## Usage
+## Использование
 
-Run commands from the project root. Commands below use the source-tree layout (`.\go\mexporter.exe`); if you unpacked a release archive, run `.\mexporter.exe` (or `./mexporter` on Linux) from the archive folder — the flags are identical.
+Команды выполняются из корня проекта. В примерах ниже используется раскладка исходников (`.\go\mexporter.exe`); если вы распаковали архив релиза, запускайте `.\mexporter.exe` (или `./mexporter` в Linux) из папки архива — флаги те же.
 
 ```powershell
-# First run: create/import session (mode 0), then continue
+# Первый запуск: создать/импортировать сессию (режим 0), затем продолжить
 .\go\mexporter.exe -init-session
 
-# Create/import session and immediately list folders
+# Создать/импортировать сессию и сразу показать папки
 .\go\mexporter.exe -init-session -list
 
-# Show folder tree (requires valid session)
+# Показать дерево папок (нужна действующая сессия)
 .\go\mexporter.exe -list
 
-# Interactive folder selection, then export
+# Интерактивный выбор папок, затем экспорт
 .\go\mexporter.exe
 
-# Export folders already saved in config (no interactive UI)
+# Экспортировать папки, уже сохранённые в конфиге (без интерактивного выбора)
 .\go\mexporter.exe -no-tui
 
-# Enumerate messages in selected folders without downloading
+# Перечислить письма в выбранных папках без скачивания
 .\go\mexporter.exe -folders 0 -dry-run -v
 
-# Export specific folders
+# Экспортировать конкретные папки
 .\go\mexporter.exe -folders 0,1
 
-# Check existing files against the journal (add -verify-hash for SHA-256)
+# Сверить существующие файлы с журналом (добавьте -verify-hash для SHA-256)
 .\go\mexporter.exe -verify -json
 
-# Accept a run where some folders or threads failed
+# Принять запуск, в котором часть папок или цепочек не удалась
 .\go\mexporter.exe -no-tui -allow-partial
 
-# Use custom paths or API base
+# Свои пути или базовый URL API
 .\go\mexporter.exe -session <session-file> -config <config-file> -out <output-dir> -base-url <api-base>
 ```
 
-### Common flags
+### Основные флаги
 
-| Flag | Description |
+| Флаг | Описание |
 | --- | --- |
-| `-init-session` | Guided session setup: open browser for manual sign-in, then capture cookies and the web-session token |
-| `-refresh-session` | Refresh the web-session token from the mail UI using the stored cookies (no browser) |
-| `-login-url` | URL to open during `-init-session` (default: `https://e.mail.ru/`) |
-| `-force` | Replace an existing session (`-init-session`) or remove a stale/active export lock |
-| `-list` | Print folder tree and exit |
-| `-folders` | Comma-separated folder IDs to export |
-| `-dry-run` | Enumerate only, do not download message files |
-| `-limit` | Cap the number of messages attempted in this run (0 = no limit) |
-| `-workers` | Number of download workers |
-| `-delay` | Pause per worker as a Go duration (for example `250ms`); `0` uses config `delay_ms` |
-| `-no-tui` | Skip interactive selector and use folders from config |
-| `-session` | Path to session file (default: `session/session.json`) |
-| `-config` | Path to config file (default: `mexporter.json`) |
-| `-out` | Output root directory |
-| `-base-url` | Mail API base URL (default: `https://e.mail.ru/api/v1/`) |
-| `-verify` | Check journal entries against files and exit |
-| `-verify-hash` | Also compare SHA-256 (implies `-verify`) |
-| `-json` | Write JSON to stdout for `-list`, export summary, or `-verify` |
-| `-allow-partial` | Exit 0 even when folders or threads failed |
-| `-v` | Verbose output |
+| `-init-session` | Пошаговая настройка сессии: открыть браузер для входа, затем считать cookie и веб-токен сессии |
+| `-refresh-session` | Обновить веб-токен сессии через интерфейс почты по сохранённым cookie (без браузера) |
+| `-login-url` | URL, который открывается при `-init-session` (по умолчанию: `https://e.mail.ru/`) |
+| `-force` | Заменить существующую сессию (`-init-session`) или снять устаревшую/активную блокировку экспорта |
+| `-list` | Показать дерево папок и выйти |
+| `-folders` | ID папок для экспорта через запятую |
+| `-dry-run` | Только перечислить письма, не скачивать |
+| `-limit` | Ограничить число писем, обрабатываемых в этом запуске (0 — без ограничения) |
+| `-workers` | Число потоков загрузки |
+| `-delay` | Пауза на поток в формате длительности Go (например `250ms`); `0` — взять `delay_ms` из конфига |
+| `-no-tui` | Не открывать интерактивный выбор, взять папки из конфига |
+| `-session` | Путь к файлу сессии (по умолчанию: `session/session.json`) |
+| `-config` | Путь к файлу конфигурации (по умолчанию: `mexporter.json`) |
+| `-out` | Корневой каталог вывода |
+| `-base-url` | Базовый URL API почты (по умолчанию: `https://e.mail.ru/api/v1/`) |
+| `-verify` | Сверить записи журнала с файлами и выйти |
+| `-verify-hash` | Дополнительно сравнить SHA-256 (включает `-verify`) |
+| `-json` | Вывести JSON в stdout для `-list`, итогов экспорта или `-verify` |
+| `-allow-partial` | Завершиться с кодом 0, даже если часть папок или цепочек не удалась |
+| `-v` | Подробный вывод |
 
-## Session
+## Сессия
 
-Authentication data is stored in a session file (for example `session/session.json`). Treat this file as secret and do not share or commit it.
+Данные входа хранятся в файле сессии (например `session/session.json`). Считайте этот файл секретом: не публикуйте его и не добавляйте в репозиторий.
 
-### First run / session setup (mode 0)
+### Первый запуск и настройка сессии (режим 0)
 
-If you do not have a session file yet, run:
+Если файла сессии ещё нет, выполните:
 
 ```powershell
 .\go\mexporter.exe -init-session
 ```
 
-This mode:
-1. Refuses to overwrite an existing session file unless `-force` is passed.
-2. Tries to capture the session automatically: it opens the login page in a debuggable Chrome/Edge window and you sign in manually. It then reads the session cookies from the browser and fetches the web-session token that the mail UI embeds into its inbox page (`/api/v1/user/short`). The resulting session is checked against the API before the file is written; if nothing is accepted, it falls back to manual import.
-3. Falls back to manual import if automatic capture cannot run: you export session JSON (fields `email`, `cookies`, and either `token` or `access_token`; optionally `csrf_token`) from the browser, save it to a file or paste it into the prompt, and the app saves it to the session file.
+Этот режим:
+1. Отказывается перезаписывать существующий файл сессии, если не передан `-force`.
+2. Пытается захватить сессию автоматически: открывает страницу входа в браузере Chrome/Edge в режиме отладки, и вы входите вручную. Затем программа читает cookie сессии из браузера и получает веб-токен, который интерфейс почты встраивает в страницу входящих (`/api/v1/user/short`). Сессия проверяется через API до записи файла; если ничего не подошло, выполняется переход к ручному импорту.
+3. Переходит к ручному импорту, если автоматический захват невозможен: вы экспортируете JSON сессии (поля `email`, `cookies` и одно из `token` или `access_token`; при наличии `csrf_token`) из браузера, сохраняете в файл или вставляете в приглашение, и программа записывает его в файл сессии.
 
-Required session JSON fields: `email`, `cookies` (array) and either `token` (current web UI) or `access_token` (older sessions). Optional: `csrf_token`.
+Обязательные поля JSON сессии: `email`, `cookies` (массив) и одно из `token` (текущий веб-интерфейс) или `access_token` (старые сессии). Необязательно: `csrf_token`.
 
-The web-session `token` expires independently of the cookies. Refresh it without signing in again:
+Веб-токен `token` истекает независимо от cookie. Обновить его без повторного входа:
 
 ```powershell
 .\go\mexporter.exe -refresh-session
 ```
 
-This fetches a fresh token from the mail UI using the stored cookies and saves it back to the same session file.
+Команда получает свежий токен из интерфейса почты по сохранённым cookie и записывает его обратно в тот же файл сессии.
 
-After saving, the app continues with the requested action in the same run (for example `-list`, folder selection, or export). If the session is invalid, the command will fail when it tries to access the API.
+После сохранения программа продолжает запрошенное действие в том же запуске (например `-list`, выбор папок или экспорт). Если сессия недействительна, команда завершится ошибкой при обращении к API.
 
-If the tool exits with code `2` during normal operation, the session is no longer valid. Recreate/update it with `-init-session` or replace the session file.
+Если при обычной работе программа завершилась с кодом `2`, сессия больше не действительна. Пересоздайте её через `-init-session` или замените файл сессии.
 
-## Typical workflows
+## Типичные сценарии
 
-### First export of a mailbox
-1. Run `-init-session` and sign in in the browser that opens; the app captures the session automatically (manual session JSON import is the fallback).
-2. Let the app list folders and select the ones you need.
-3. Start the export; rerun the same command later to resume.
+### Первый экспорт ящика
+1. Запустите `-init-session` и войдите в браузере, который откроется; программа захватит сессию автоматически (ручной импорт JSON — запасной вариант).
+2. Дайте программе показать папки и выберите нужные.
+3. Запустите экспорт; позже ту же команду можно повторять для докачки.
 
-### Resume after interruption
-- Re-run the export with the same session/config/output paths.
-- Completed messages are skipped using the journal; failed ones are retried.
-- If a download stopped mid-write, the size mismatch makes the exporter download it again.
+### Продолжение после прерывания
+- Запустите экспорт снова с теми же путями сессии, конфига и вывода.
+- Готовые письма пропускаются по журналу; неудачные повторяются.
+- Если загрузка оборвалась на записи файла, несовпадение размера заставит экспортёр скачать его заново.
 
-### Verify and repair
-- Run `-verify` (or `-verify-hash` when journal entries include SHA-256).
-- Missing or size-mismatched files exit with code 1; rerunning the export re-downloads them.
+### Проверка и восстановление
+- Запустите `-verify` (или `-verify-hash`, если в записях журнала есть SHA-256).
+- Отсутствующие файлы или несовпадение размера завершаются кодом 1; повторный экспорт скачает их заново.
 
-### Multiple mailboxes
-- Use a separate `-session`, `-config`, and `-out` set per mailbox to keep state isolated.
+### Несколько ящиков
+- Для каждого ящика используйте свои `-session`, `-config` и `-out`, чтобы состояние не смешивалось.
 
-### Safe trial run
-- Use `-dry-run -v` first to verify enumeration and folder mapping without downloading files.
-- Use `-limit N` to cap the number of messages attempted for a quick test.
-- If some folders or threads fail, rerun after fixing the cause or pass `-allow-partial` to accept a partial result.
+### Безопасная пробная попытка
+- Сначала `-dry-run -v`, чтобы проверить перечисление и раскладку папок без скачивания.
+- `-limit N` ограничивает число обрабатываемых писем — удобно для быстрой проверки.
+- Если часть папок или цепочек не удалась, повторите запуск после устранения причины или передайте `-allow-partial`, чтобы принять частичный результат.
 
-## Output layout
+## Структура выходных файлов
 
 ```text
 <output-dir>/
@@ -216,22 +232,22 @@ If the tool exits with code `2` during normal operation, the session is no longe
     export-log.jsonl
 ```
 
-- `export-log.jsonl` is the append-only source of truth.
-- `export-log.json` is a snapshot for faster reads.
+- `export-log.jsonl` — дописываемый журнал, источник истины.
+- `export-log.json` — снимок для быстрого чтения.
 
-## Exit codes
+## Коды выхода
 
-| Code | Meaning |
+| Код | Значение |
 | --- | --- |
-| `0` | Success, or accepted partial run with `-allow-partial` |
-| `1` | Runtime/usage error, failed integrity check, or partial export |
-| `2` | Authentication required or expired |
-| `130` | Canceled by user (including interactive selector quit) |
+| `0` | Успех или принятый частичный результат с `-allow-partial` |
+| `1` | Ошибка выполнения/использования, неудачная проверка целостности или частичный экспорт |
+| `2` | Требуется авторизация или сессия истекла |
+| `130` | Отменено пользователем (включая выход из интерактивного выбора) |
 
-## Notes
+## Примечания
 
-- Enumeration uses ascending date order to avoid missing messages during long runs.
-- Message identity is based on provider uidl.
-- Do not run multiple instances against the same output directory; a lock file in each account directory enforces this (`-force` removes it).
-- Export directories may become very large; inspect logs/snapshots instead of scanning all files.
-- Session cookies from `mail.ru`, `vk.com`, `vk.ru`, and `userapi.com` domains are accepted; unrelated cookies are ignored.
+- Перечисление идёт по возрастанию даты, чтобы не терять письма при длительном экспорте.
+- Идентификатором письма служит uidl провайдера.
+- Не запускайте несколько экземпляров с одним выходным каталогом; в каталоге каждого аккаунта есть lock-файл (`-force` снимает его).
+- Каталоги экспорта могут быть очень большими; смотрите журналы и снимки, а не сканируйте все файлы.
+- Принимаются cookie доменов `mail.ru`, `vk.com`, `vk.ru` и `userapi.com`; посторонние игнорируются.

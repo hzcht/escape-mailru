@@ -1,20 +1,20 @@
-# Mail migration helpers
+# Вспомогательные утилиты миграции почты
 
 ## `migrate_to_imap.py`
 
-Uploads local `.eml` files to an IMAP mailbox using only the Python standard library.
+Загружает локальные файлы `.eml` в IMAP-ящик, используя только стандартную библиотеку Python.
 
-### Requirements
+### Требования
 
 - Python 3
-- Access to an IMAP server (SSL or plain connection)
-- Valid mailbox credentials
+- Доступ к IMAP-серверу (SSL или обычное соединение)
+- Действующие учётные данные ящика
 
-### Configuration
+### Конфигурация
 
-You can provide settings via a JSON config file, command-line arguments, or a mix of both (CLI arguments override config values).
+Параметры можно задать в JSON-файле конфигурации, аргументами командной строки или сочетанием обоих способов (аргументы CLI перекрывают значения конфига).
 
-Example `config.json`:
+Пример `config.json`:
 
 ```json
 {
@@ -26,41 +26,41 @@ Example `config.json`:
 }
 ```
 
-Do not store real credentials in version-controlled files.
+Не храните настоящие учётные данные в файлах под контролем версий.
 
-### Usage
+### Использование
 
-From the `scripts` directory:
+Из каталога `scripts`:
 
 ```powershell
-# Using a config file
+# С файлом конфигурации
 python migrate_to_imap.py --config config.json
 
-# Using CLI arguments
+# Аргументами командной строки
 python migrate_to_imap.py --server imap.example.com --port 993 --login user@example.com --password "<password>" --folder "C:\path\to\exported-mail"
 ```
 
-### Common arguments
+### Основные аргументы
 
-| Argument | Description |
+| Аргумент | Описание |
 | --- | --- |
-| `--config` | Path to JSON configuration file |
-| `--server` | IMAP server hostname |
-| `--port` | IMAP port (typically `993` for SSL, `143` for plain) |
-| `--login` | Mailbox login/username |
-| `--password` | Mailbox password (prefer secure input/storage practices) |
-| `--folder` | Directory containing `.eml` files (scanned recursively) |
-| `--ssl` / `--no-ssl` | Force SSL/TLS on or off |
+| `--config` | Путь к JSON-файлу конфигурации |
+| `--server` | Имя хоста IMAP-сервера |
+| `--port` | Порт IMAP (обычно `993` для SSL, `143` для обычного соединения) |
+| `--login` | Логин и имя пользователя ящика |
+| `--password` | Пароль ящика (предпочитайте безопасный ввод и хранение) |
+| `--folder` | Каталог с файлами `.eml` (сканируется рекурсивно) |
+| `--ssl` / `--no-ssl` | Принудительно включить или выключить SSL/TLS |
 
-### Behavior
+### Поведение
 
-- Scans the target folder recursively for `.eml` files.
-- Parses each file and appends it to the target IMAP mailbox.
-- Logs progress and continues when individual files fail.
-- Prints a summary of successes, failures, and skipped files.
+- Рекурсивно сканирует целевой каталог на файлы `.eml`.
+- Разбирает каждый файл и добавляет его в целевой IMAP-ящик.
+- Логирует прогресс и продолжает при сбое отдельных файлов.
+- Печатает итог: успехи, сбои и пропущенные файлы.
 
-### Notes
+### Примечания
 
-- Message parsing/upload behavior depends on message structure and server capabilities.
-- For large migrations, consider testing with a small subset first.
-- Keep backups of source `.eml` files before migration.
+- Разбор и загрузка писем зависят от структуры писем и возможностей сервера.
+- Для больших миграций сначала попробуйте небольшое подмножество.
+- Сохраняйте резервные копии исходных `.eml` перед миграцией.

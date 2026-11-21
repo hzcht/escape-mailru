@@ -1,96 +1,96 @@
-# Architecture
+# Архитектура
 
-## Overview
+## Обзор
 
-`mexporter` is a Go CLI application that exports mailbox messages to local `.eml` files using a read-only web API workflow. It emphasizes deterministic enumeration, resumability, and safe file/journal handling.
+`mexporter` — CLI-приложение на Go, которое экспортирует письма из почтового ящика в локальные файлы `.eml` через веб-API в режиме только для чтения. Ключевые свойства — детерминированное перечисление, докачка и безопасная работа с файлами и журналом.
 
-## High-level flow
+## Общая схема
 
 ```text
 session -> mailapi -> layout -> config/TUI -> journal -> exporter
 ```
 
-1. **Session**: load and validate authentication material. With `-init-session` (mode 0), the CLI opens a debuggable browser for sign-in, captures cookies and the web-session token from the browser's own traffic (manual session JSON import as a fallback), and validates the result against the API before saving. `-refresh-session` renews the web-session token from stored cookies without a browser.
-2. **Mail API**: list folders, enumerate threads/messages, expand threads, download raw `.eml` data.
-3. **Layout**: map provider folders to local paths and generate safe filenames.
-4. **Config/TUI**: resolve runtime settings and folder selection.
-5. **Journal**: persist per-message state in append-only logs and snapshots.
-6. **Exporter**: coordinate enumeration, filtering/resume checks, parallel downloads, retries, and reporting.
+1. **Session**: загрузка и проверка данных авторизации. При `-init-session` (режим 0) CLI открывает браузер в режиме отладки для входа, захватывает cookie и веб-токен сессии из трафика браузера (ручной импорт JSON сессии — запасной вариант) и проверяет результат через API до сохранения. `-refresh-session` обновляет веб-токен сессии по сохранённым cookie без браузера.
+2. **Mail API**: список папок, перечисление цепочек и писем, развёртывание цепочек, загрузка необработанных данных `.eml`.
+3. **Layout**: сопоставление папок провайдера локальным путям и генерация безопасных имён файлов.
+4. **Config/TUI**: параметры запуска и выбор папок.
+5. **Journal**: состояние каждого письма в дописываемых журналах и снимках.
+6. **Exporter**: оркестрация перечисления, проверок фильтрации и докачки, параллельных загрузок, повторов и отчётности.
 
-## Directory structure (key parts)
+## Структура каталогов (основное)
 
 ```text
 go/
-  cmd/mexporter/      CLI entrypoint and wiring
+  cmd/mexporter/      точка входа CLI и сборка зависимостей
   internal/
-    session/          Session loading/validation
-    mailapi/          API client and response types
-    layout/           Folder tree and output path helpers
-    config/           Config load/save/defaults
-    journal/          JSONL log + JSON snapshot
-    exporter/         Export orchestration and workers
-    tui/              Folder selection UI/fallback
-    cdp/              Chrome DevTools Protocol client (browser session capture)
-scripts/              Helper scripts (e.g. IMAP migration)
-docs/                 Project documentation
+    session/          загрузка и проверка сессии
+    mailapi/          API-клиент и типы ответов
+    layout/           дерево папок и хелперы путей вывода
+    config/           загрузка/сохранение/умолчания конфига
+    journal/          журнал JSONL + снимок JSON
+    exporter/         оркестрация экспорта и воркеры
+    tui/              UI выбора папок и запасной режим
+    cdp/              клиент Chrome DevTools Protocol (захват сессии браузера)
+scripts/              вспомогательные скрипты (например, миграция в IMAP)
+docs/                 документация проекта
 ```
 
-## Core components
+## Основные компоненты
 
-### Session
-- Reads session/auth data from a local file (`cookies` plus a `token` or legacy `access_token`).
-- Supports guided bootstrap via `-init-session`: open a debuggable browser for sign-in, capture cookies and the web-session token from the browser traffic (manual session JSON import as a fallback), check the candidate against the API, then save.
-- Supports token renewal via `-refresh-session` using stored cookies only (no browser).
-- Supplies credentials/tokens required by API requests.
-- Authentication failures are surfaced to the caller (exit code signaling handled at CLI level).
+### Session (сессия)
+- Читает данные сессии и авторизации из локального файла (`cookies` плюс `token` или устаревший `access_token`).
+- Поддерживает пошаговую настройку через `-init-session`: открыть браузер в режиме отладки для входа, захватить cookie и веб-токен сессии из трафика браузера (ручной импорт JSON — запасной вариант), проверить кандидата через API и сохранить.
+- Поддерживает обновление токена через `-refresh-session` только по сохранённым cookie (без браузера).
+- Предоставляет учётные данные и токены, необходимые для запросов API.
+- Ошибки авторизации передаются вызывающему коду (сигнализация кодами выхода — на уровне CLI).
 
-### Mail API client
-- Performs read-only requests for folder and message/thread data.
-- Downloads message content without mutating mailbox state.
-- Fetches the web-session token from the mail UI inbox bootstrap (`FetchWebToken`) and probes the API (`Probe`) to confirm a session before it is saved or refreshed.
-- Owns transport retries: exponential backoff, `Retry-After` handling, and no retry for permanent 4xx responses.
-- Captures bounded error bodies for diagnostics and tunes the HTTP transport for multiple workers.
+### API-клиент почты
+- Выполняет запросы только для чтения к данным папок, писем и цепочек.
+- Скачивает содержимое писем, не изменяя состояние ящика.
+- Получает веб-токен сессии из загрузочной страницы входящих интерфейса почты (`FetchWebToken`) и проверяет API (`Probe`), чтобы подтвердить сессию до её сохранения или обновления.
+- Отвечает за повторы транспорта: экспоненциальная задержка, обработка `Retry-After`, без повторов для постоянных ответов 4xx.
+- Сохраняет ограниченные тела ошибок для диагностики и настраивает HTTP-транспорт под несколько воркеров.
 
-### Layout
-- Builds a local folder structure mirroring mailbox hierarchy.
-- Produces stable, filesystem-safe filenames using message identity and metadata.
-- Never truncates the identity portion; long or unsafe identities get a deterministic hash suffix.
+### Раскладка (layout)
+- Строит локальную структуру папок, повторяющую иерархию ящика.
+- Формирует стабильные и безопасные для файловой системы имена из идентичности и метаданных письма.
+- Никогда не усекает часть идентификатора; длинные или небезопасные идентификаторы получают детерминированный хеш-суффикс.
 
-### Config and selection
-- Loads runtime configuration and defaults.
-- Supports interactive folder selection and non-interactive modes.
-- Persists selected folders/settings when required by CLI behavior.
-- Validates configured/selected folder IDs against the live folder tree.
+### Конфигурация и выбор
+- Загружает параметры запуска и значения по умолчанию.
+- Поддерживает интерактивный выбор папок и неинтерактивные режимы.
+- Сохраняет выбранные папки и настройки, когда этого требует поведение CLI.
+- Проверяет ID папок из конфига и выбора по актуальному дереву папок.
 
-### Journal
-- `export-log.jsonl`: append-only event/state log (source of truth).
-- `export-log.json`: snapshot for fast status reads.
-- Snapshot is loaded first, then JSONL is replayed; an empty or corrupt JSONL does not erase a valid snapshot.
-- Supports resume by distinguishing completed, skipped, and failed work; recorded size is compared with the file.
-- Optional SHA-256 fields enable offline integrity verification (`-verify-hash`).
+### Журнал
+- `export-log.jsonl`: дописываемый журнал событий и состояний (источник истины).
+- `export-log.json`: снимок для быстрого чтения статуса.
+- Сначала загружается снимок, затем проигрывается JSONL; пустой или повреждённый JSONL не стирает действительный снимок.
+- Поддерживает докачку, различая завершённую, пропущенную и неудачную работу; записанный размер сверяется с файлом.
+- Необязательные поля SHA-256 позволяют офлайн-проверку целостности (`-verify-hash`).
 
-### Exporter
-- Enumerates messages in ascending date order and streams them into the worker pool.
-- Uses a worker pool for downloads with bounded concurrency.
-- Retries transient failures at the API client level and records outcomes in the journal.
-- Writes files safely and validates downloaded artifacts before marking complete.
-- Reports failed folders/threads and truncation as a partial run.
+### Экспортёр
+- Перечисляет письма по возрастанию даты и потоково передаёт их в пул воркеров.
+- Использует пул воркеров для загрузок с ограниченной параллельностью.
+- Повторяет временные сбои на уровне API-клиента и фиксирует результаты в журнале.
+- Пишет файлы безопасно и проверяет скачанные артефакты перед пометкой о завершении.
+- Сообщает об упавших папках и цепочках, а также об усечении, как о частичном запуске.
 
 ### CLI
-- Maps errors to documented exit codes (`0`, `1`, `2`, `130`).
-- Provides offline verification, JSON summaries, a per-account export lock, and `-allow-partial`.
+- Сопоставляет ошибки с задокументированными кодами выхода (`0`, `1`, `2`, `130`).
+- Предоставляет офлайн-проверку, JSON-итоги, блокировку экспорта на аккаунт и `-allow-partial`.
 
-## Invariants
+## Инварианты
 
-- Enumeration order must be ascending by date for long-running exports.
-- Message identity is provider uidl.
-- Only read operations are permitted against the mailbox.
-- Journal/download completion must reflect actual, valid local files.
-- A single account output target must not be written by concurrent exporter processes; the CLI enforces this with a lock file.
+- Порядок перечисления должен быть по возрастанию даты для длительных экспортов.
+- Идентичность письма — uidl провайдера.
+- Разрешены только операции чтения.
+- Признак завершения загрузки и записи журнала должен отражать реальные действительные локальные файлы.
+- Один выходной каталог аккаунта не должен писаться параллельными процессами экспортёра; CLI обеспечивает это lock-файлом.
 
-## Testing and verification
+## Тестирование и проверка
 
-Typical checks from `go/`:
+Типичные проверки из `go/`:
 
 ```powershell
 gofmt -l .
@@ -98,10 +98,6 @@ go vet ./...
 go test ./...
 ```
 
-Targeted tests can be used during development for specific packages or scenarios.
+Во время разработки можно запускать точечные тесты для конкретных пакетов или сценариев.
 
-Fuzz targets cover the two places where untrusted strings become file-system
-paths or credentials: `layout.SanitizeName`/`SafeFilename` (unsafe characters,
-reserved device names, identity preservation) and session JSON parsing plus the
-cookie domain allow-list. Seeds run as ordinary tests; `.github/workflows/ci.yml`
-runs gofmt, vet, build, tests, `-race`, and a short fuzz pass on every push.
+Фаззинг-цели покрывают два места, где недоверенные строки превращаются в пути файловой системы или учётные данные: `layout.SanitizeName`/`SafeFilename` (небезопасные символы, зарезервированные имена устройств, сохранение идентификатора) и разбор JSON сессии плюс белый список доменов cookie. Семена выполняются как обычные тесты; `.github/workflows/ci.yml` запускает gofmt, vet, build, тесты, `-race` и короткий прогон фаззинга на каждый push.
