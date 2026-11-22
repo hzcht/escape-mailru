@@ -11,6 +11,10 @@ mexporter.exe
 mexporter.json
 mexporter-*.json
 
+# Local migration credentials and runtime state (never commit real passwords)
+/scripts/config.json
+/scripts/imap_upload_state*.jsonl
+
 # Logs and temporary output from Playwright/session capture
 *.log
 .notes

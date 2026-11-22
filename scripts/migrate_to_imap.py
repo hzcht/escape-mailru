@@ -101,13 +101,13 @@ def parse_args():
         "--password",
         type=str,
         default="",
-        help="Email пароль (если не указан — из config, промптом или env)",
+        help="Email пароль (если не указан — из config)",
     )
     parser.add_argument(
         "--folder",
         type=str,
         default="",
-        help="Локальная папка с .eml файлами (по умолчанию — текущая папка скрипта)",
+        help="Локальная папка с .eml файлами (по умолчанию — текущая папка)",
     )
     parser.add_argument(
         "--mailbox",
@@ -361,8 +361,10 @@ def main():
     # Пользователь, явно передавший --log/--state, получит свои файлы без суффикса.
     ctx = _context_suffix(args)
 
-    def _suffix_basename(path_str):
+    def _suffix_basename(path_str, default):
         p = Path(path_str)
+        if path_str != default:
+            return p  # явный путь не трогаем
         name = p.name  # просто имя файла (без пути)
         if ctx:
             # Вставляем суффикс перед расширением
@@ -373,8 +375,8 @@ def main():
                 name = name + ctx
         return p.parent / name
 
-    log_path = _suffix_basename(args.log)
-    state_path = _suffix_basename(args.state)
+    log_path = _suffix_basename(args.log, "imap_migration.log")
+    state_path = _suffix_basename(args.state, "imap_upload_state.jsonl")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     LOG_FILE = open(log_path, "a", encoding="utf-8")
@@ -427,7 +429,6 @@ def main():
     # --folder — локальный путь; --mailbox — отдельный параметр IMAP-папки.
     mailbox = args.mailbox or "INBOX"
     folder_root = Path(args.folder).resolve()
-    state_path = Path(args.state)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     uploaded = load_uploaded(state_path)
 

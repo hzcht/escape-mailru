@@ -139,8 +139,18 @@ func run(args []string) int {
 // parseFlags defines the command line surface.
 func parseFlags(args []string) (cliFlags, error) {
 	var fl cliFlags
+	fs := newFlagSet(&fl)
+	if err := fs.Parse(args); err != nil {
+		return cliFlags{}, err
+	}
+	return fl, nil
+}
+
+// newFlagSet defines every command line flag. Parsing is separate so that
+// documentation tests can enumerate the surface without running the CLI.
+func newFlagSet(fl *cliFlags) *flag.FlagSet {
 	fs := flag.NewFlagSet("mexporter", flag.ContinueOnError)
-	fs.StringVar(&fl.sessionPath, "session", "session/session.json", "session file with cookies and access_token")
+	fs.StringVar(&fl.sessionPath, "session", "session/session.json", "session file with cookies and a web or legacy token")
 	fs.StringVar(&fl.configPath, "config", "mexporter.json", "config file with the folder selection")
 	fs.StringVar(&fl.outDir, "out", "", "output root (default: config or mail-export)")
 	fs.StringVar(&fl.folderIDs, "folders", "", "comma-separated folder ids; skips the TUI")
@@ -161,10 +171,7 @@ func parseFlags(args []string) (cliFlags, error) {
 	fs.BoolVar(&fl.jsonOut, "json", false, "write machine-readable JSON to stdout")
 	fs.BoolVar(&fl.allowPartial, "allow-partial", false, "exit 0 even when some folders or threads failed")
 	fs.BoolVar(&fl.force, "force", false, "replace an existing session or stale lock")
-	if err := fs.Parse(args); err != nil {
-		return cliFlags{}, err
-	}
-	return fl, nil
+	return fs
 }
 
 // loadNodes fetches the folder tree and flattens it in display order.
