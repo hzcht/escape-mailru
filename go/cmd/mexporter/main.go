@@ -96,7 +96,7 @@ func run(args []string) int {
 		return fail(err)
 	}
 	logf("session: account=%s, cookies=%d (earliest expiry=%s), token=%s, access_token=%s",
-		sess.Email, len(sess.Cookies), earliestCookieExpiry(sess), yesNo(sess.Token), yesNo(sess.AccessToken))
+		sess.Email, len(sess.Cookies), earliestExpiry(sess), yesNo(sess.Token), yesNo(sess.AccessToken))
 	if warning := session.ExpiryWarning(sess, time.Now()); warning != "" {
 		logf("session warning: %s", warning)
 	}
@@ -475,18 +475,12 @@ func yesNo(v string) string {
 	return "yes"
 }
 
-// earliestCookieExpiry formats the soonest cookie expiry, or "-" when unknown.
-func earliestCookieExpiry(s session.Session) string {
-	var earliest float64
-	for _, c := range s.Cookies {
-		if c.Expires > 0 && (earliest == 0 || c.Expires < earliest) {
-			earliest = c.Expires
-		}
+// earliestExpiry formats the soonest mail-cookie expiry, or "-" when unknown.
+func earliestExpiry(s session.Session) string {
+	if at, ok := session.EarliestExpiry(s); ok {
+		return at.Format("2006-01-02")
 	}
-	if earliest == 0 {
-		return "-"
-	}
-	return time.Unix(int64(earliest), 0).Format("2006-01-02")
+	return "-"
 }
 
 // runRefreshSession updates the web-session token using the stored cookies.

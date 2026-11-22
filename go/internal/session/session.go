@@ -139,7 +139,7 @@ func ExpiryWarning(s Session, now time.Time) string {
 		if !AcceptsDomain(c.Domain) {
 			continue
 		}
-		if c.Expires <= unix || int64(c.Expires) > deadline {
+		if c.Expires < unix || int64(c.Expires) > deadline {
 			continue
 		}
 		names = append(names, c.Name)

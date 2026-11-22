@@ -130,15 +130,24 @@ func (w *wsConn) writeFrameContext(ctx context.Context, opcode byte, payload []b
 		if err := w.conn.SetWriteDeadline(deadline); err != nil {
 			return err
 		}
-		// NOERR: clearing the deadline cannot invalidate a written frame.
-		defer func() { _ = w.conn.SetWriteDeadline(time.Time{}) }()
 	}
-	stop := context.AfterFunc(ctx, func() {
-		// NOERR: the expired deadline is only a wake-up signal for a blocked write.
+	// The write runs in a goroutine: on cancellation the blocked write is
+	// woken with a past deadline and waited for, so the connection is never
+	// left with a stale deadline for a later deadline-less write.
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.writeFrame(opcode, payload) }()
+	var err error
+	select {
+	case err = <-errCh:
+	case <-ctx.Done():
+		// NOERR: the past deadline is only a wake-up signal for a blocked write.
 		_ = w.conn.SetWriteDeadline(time.Unix(1, 0))
-	})
-	defer stop()
-	if err := w.writeFrame(opcode, payload); err != nil {
+		err = <-errCh
+	}
+	// NOERR: clearing the deadline cannot invalidate a written frame; it runs
+	// only after the write goroutine has returned in both select branches.
+	_ = w.conn.SetWriteDeadline(time.Time{})
+	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}

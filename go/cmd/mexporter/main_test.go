@@ -171,20 +171,6 @@ func TestGateSession(t *testing.T) {
 	})
 }
 
-func TestEarliestCookieExpiry(t *testing.T) {
-	if got := earliestCookieExpiry(session.Session{}); got != "-" {
-		t.Fatalf("empty = %q, want -", got)
-	}
-	s := session.Session{Cookies: []session.Cookie{
-		{Expires: float64(time.Date(2026, 12, 1, 12, 0, 0, 0, time.Local).Unix())},
-		{Expires: 0},
-		{Expires: float64(time.Date(2026, 11, 1, 12, 0, 0, 0, time.Local).Unix())},
-	}}
-	if got := earliestCookieExpiry(s); got != "2026-11-01" {
-		t.Fatalf("got %q, want 2026-11-01", got)
-	}
-}
-
 func TestRunRejectsBadFlag(t *testing.T) {
 	if got := run([]string{"-bogus"}); got != exitFail {
 		t.Fatalf("exit = %d", got)

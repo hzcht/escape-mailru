@@ -131,6 +131,25 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestEarliestExpiry(t *testing.T) {
+	if _, ok := EarliestExpiry(Session{}); ok {
+		t.Fatal("expected ok=false for empty session")
+	}
+	s := Session{Cookies: []Cookie{
+		{Name: "a", Domain: ".mail.ru", Expires: float64(time.Date(2026, 12, 1, 12, 0, 0, 0, time.Local).Unix())},
+		{Name: "b", Domain: ".mail.ru", Expires: float64(time.Date(2026, 11, 1, 12, 0, 0, 0, time.Local).Unix())},
+		{Name: "c", Domain: "notmail.ru", Expires: float64(time.Date(2026, 10, 1, 12, 0, 0, 0, time.Local).Unix())},
+		{Name: "d", Domain: ".mail.ru", Expires: 0},
+	}}
+	at, ok := EarliestExpiry(s)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if want := time.Date(2026, 11, 1, 12, 0, 0, 0, time.Local); !at.Equal(want) {
+		t.Fatalf("EarliestExpiry = %v, want %v", at, want)
+	}
+}
+
 func validSession() Session {
 	return Session{
 		Email:       "user@example.com",
