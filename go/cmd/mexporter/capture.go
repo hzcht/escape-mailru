@@ -427,7 +427,7 @@ func verifyWebCaptured(ctx context.Context, conn *cdp.Conn, baseURL string) (ses
 	}
 	candidate.Email = email
 	candidate.Token = token
-	if err := session.Validate(candidate); err != nil {
+	if err := session.Validate(candidate, time.Now()); err != nil {
 		return session.Session{}, err
 	}
 	verify := mailapi.New(mailapi.Options{
@@ -463,13 +463,13 @@ func verifyCaptured(ctx context.Context, conn *cdp.Conn, tokens []string, csrf, 
 			CSRFToken:   csrf,
 			Cookies:     cookies,
 		}
-		if err := session.Validate(candidate); err != nil {
+		if err := session.Validate(candidate, time.Now()); err != nil {
 			lastErr = err
 			continue
 		}
 		cli := mailapi.New(mailapi.Options{
 			Email:        mailbox,
-			AccessToken:  token,
+			LegacyToken:  token,
 			CookieHeader: candidate.CookieHeader(time.Now()),
 			BaseURL:      baseURL,
 		})

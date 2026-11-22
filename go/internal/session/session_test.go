@@ -98,7 +98,7 @@ func TestValidateRequiresUsableCookies(t *testing.T) {
 			{Name: "s", Value: "1", Domain: ".mail.ru", Expires: float64(now.Add(-time.Hour).Unix())},
 		},
 	}
-	if err := Validate(s); err == nil {
+	if err := Validate(s, time.Now()); err == nil {
 		t.Fatal("expired cookie must fail validation")
 	}
 }
@@ -117,16 +117,16 @@ func TestExpiryWarning(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
-	if err := Validate(Session{}); err == nil {
+	if err := Validate(Session{}, time.Now()); err == nil {
 		t.Fatal("expected error for empty session")
 	}
-	if err := Validate(Session{Email: "u", AccessToken: "t", Cookies: []Cookie{{Name: "s"}}}); err != nil {
+	if err := Validate(Session{Email: "u", AccessToken: "t", Cookies: []Cookie{{Name: "s"}}}, time.Now()); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if err := Validate(Session{Email: "u", Token: "w", Cookies: []Cookie{{Name: "s"}}}); err != nil {
+	if err := Validate(Session{Email: "u", Token: "w", Cookies: []Cookie{{Name: "s"}}}, time.Now()); err != nil {
 		t.Fatalf("Validate web token: %v", err)
 	}
-	if err := Validate(Session{Email: "u", Cookies: []Cookie{{Name: "s"}}}); err == nil {
+	if err := Validate(Session{Email: "u", Cookies: []Cookie{{Name: "s"}}}, time.Now()); err == nil {
 		t.Fatal("expected error without any token")
 	}
 }

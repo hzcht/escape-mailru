@@ -21,7 +21,7 @@ func FuzzSessionJSON(f *testing.F) {
 			return // malformed JSON is rejected before any validation.
 		}
 		header := s.CookieHeader(time.Now())
-		if err := Validate(s); err == nil && header == "" {
+		if err := Validate(s, time.Now()); err == nil && header == "" {
 			t.Fatalf("Validate accepted a session with no usable cookies: %q", string(data))
 		}
 		// Expiry reporting must never leak cookie values.

@@ -15,12 +15,14 @@ import (
 )
 
 const (
-	defaultBaseURL   = "https://e.mail.ru/api/v1/"
+	// DefaultBaseURL is the production mail API endpoint.
+	DefaultBaseURL   = "https://e.mail.ru/api/v1/"
 	defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
 	defaultReferer   = "https://e.mail.ru/"
 	listTimeout      = 90 * time.Second
 	threadTimeout    = 90 * time.Second
 	downloadTimeout  = 10 * time.Minute
+	probeTimeout     = 10 * time.Second
 	maxJSONBytes     = 32 << 20
 	maxMessageBytes  = 128 << 20
 	maxUIBytes       = 8 << 20
@@ -29,7 +31,7 @@ const (
 	errorBodyBytes   = 4 << 10
 )
 
-var retryFirstBackoff = time.Second
+const defaultRetryBackoff = time.Second
 
 var (
 	// ErrAuth means the session expired or was rejected.
@@ -66,50 +68,70 @@ func (e *RateLimitError) Error() string {
 // Is lets callers keep using errors.Is(err, ErrRateLimited).
 func (e *RateLimitError) Is(target error) bool { return target == ErrRateLimited }
 
-// Options configures a Client. BaseURL exists for tests.
+// Options configures a Client. BaseURL, Transport and RetryFirstBackoff exist
+// for tests and alternate deployments.
 type Options struct {
-	Email        string
-	AccessToken  string
-	Token        string
-	CookieHeader string
-	UserAgent    string
-	BaseURL      string
+	Email             string
+	LegacyToken       string
+	Token             string
+	CookieHeader      string
+	UserAgent         string
+	BaseURL           string
+	Transport         http.RoundTripper
+	RetryFirstBackoff time.Duration
 }
 
 // Client talks to the Mail.ru web API used by the VK WorkSpace UI.
 type Client struct {
-	http        *http.Client
-	email       string
-	accessToken string
-	token       string
-	cookies     string
-	userAgent   string
-	baseURL     string
+	http              *http.Client
+	email             string
+	legacyToken       string
+	token             string
+	cookies           string
+	userAgent         string
+	baseURL           string
+	retryFirstBackoff time.Duration
 }
+
+// sharedTransport pools connections for every client. Cloning the default
+// transport per client would leak idle pools and repeat TLS handshakes during
+// the capture loop, which builds a client per probe.
+var sharedTransport = func() http.RoundTripper {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 100
+	t.MaxIdleConnsPerHost = 16
+	t.IdleConnTimeout = 90 * time.Second
+	return t
+}()
 
 // New builds a client. The client retries transient transport failures and
 // rate limits internally; callers only handle the final error.
 func New(o Options) *Client {
 	base := strings.TrimRight(o.BaseURL, "/")
 	if base == "" {
-		base = strings.TrimRight(defaultBaseURL, "/")
+		base = strings.TrimRight(DefaultBaseURL, "/")
 	}
 	ua := o.UserAgent
 	if ua == "" {
 		ua = defaultUserAgent
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConns = 100
-	transport.MaxIdleConnsPerHost = 16
-	transport.IdleConnTimeout = 90 * time.Second
+	transport := o.Transport
+	if transport == nil {
+		transport = sharedTransport
+	}
+	backoff := o.RetryFirstBackoff
+	if backoff <= 0 {
+		backoff = defaultRetryBackoff
+	}
 	return &Client{
-		http:        &http.Client{Transport: transport},
-		email:       o.Email,
-		accessToken: o.AccessToken,
-		token:       o.Token,
-		cookies:     o.CookieHeader,
-		userAgent:   ua,
-		baseURL:     base,
+		http:              &http.Client{Transport: transport},
+		email:             o.Email,
+		legacyToken:       o.LegacyToken,
+		token:             o.Token,
+		cookies:           o.CookieHeader,
+		userAgent:         ua,
+		baseURL:           base,
+		retryFirstBackoff: backoff,
 	}
 }
 
@@ -123,7 +145,7 @@ func (c *Client) buildURL(path string, params url.Values) string {
 	if c.token != "" {
 		q.Set("token", c.token)
 	} else {
-		q.Set("access_token", c.accessToken)
+		q.Set("access_token", c.legacyToken)
 	}
 	q.Set("htmlencoded", "false")
 	q.Set("_", fmt.Sprintf("%d", time.Now().UnixMilli()))
@@ -144,7 +166,7 @@ func (c *Client) getBytes(ctx context.Context, path string, params url.Values, t
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("http get %s: %w", path, err)
+		return nil, fmt.Errorf("http get %s: %w", path, sanitizeTransportError(err))
 	}
 	// NOERR: the body is read below; a close error cannot change the result.
 	defer resp.Body.Close()
@@ -182,17 +204,48 @@ func retryAfter(resp *http.Response) time.Duration {
 	return 0
 }
 
-// classifyHTTP maps HTTP status codes to sentinel errors.
+// classifyHTTP maps HTTP status codes to sentinel errors. A 403 is only an
+// auth failure when its body is an envelope that says so; otherwise it is a
+// plain API error, because the API also uses 403 for CSRF and permission
+// problems that a session refresh cannot fix.
 func classifyHTTP(code int, body string, wait time.Duration) error {
 	switch {
-	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+	case code == http.StatusUnauthorized:
 		return ErrAuth
+	case code == http.StatusForbidden:
+		if envelopeSaysAuth(body) {
+			return ErrAuth
+		}
+		return &APIError{Status: code, Body: strings.TrimSpace(body)}
 	case code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable:
 		return &RateLimitError{RetryAfter: wait}
 	case code >= 400:
 		return &APIError{Status: code, Body: strings.TrimSpace(body)}
 	}
 	return nil
+}
+
+// envelopeSaysAuth reports whether a 403 body is an envelope-level auth error.
+func envelopeSaysAuth(body string) bool {
+	var env envelope
+	if json.Unmarshal([]byte(body), &env) != nil {
+		return false
+	}
+	return errors.Is(classifyEnvelope(env.Status), ErrAuth)
+}
+
+// sanitizeTransportError strips the request URL from transport errors. The
+// wrapped *url.Error carries the full URL including token query parameters,
+// and these errors end up in logs (REQ-EXPORT-010).
+func sanitizeTransportError(err error) error {
+	var uerr *url.Error
+	if !errors.As(err, &uerr) {
+		return err
+	}
+	if uerr.Err == nil {
+		return errors.New(uerr.Op + " request failed")
+	}
+	return fmt.Errorf("%s: %w", uerr.Op, uerr.Err)
 }
 
 // classifyEnvelope maps the API-level status to sentinel errors.
@@ -224,7 +277,7 @@ type envelope struct {
 // transport and API errors are retried by the client.
 func (c *Client) getJSON(ctx context.Context, path string, params url.Values, out any) error {
 	var body json.RawMessage
-	err := retry(ctx, func() error {
+	err := c.retry(ctx, func() error {
 		raw, err := c.getBytes(ctx, path, params, listTimeout, maxJSONBytes)
 		if err != nil {
 			return err
@@ -254,8 +307,8 @@ func (c *Client) getJSON(ctx context.Context, path string, params url.Values, ou
 // retry runs fn with bounded exponential backoff. Authentication errors,
 // permanent 4xx responses and caller cancellation are not retried, and the
 // final failure is not followed by an unnecessary sleep.
-func retry(ctx context.Context, fn func() error) error {
-	backoff := retryFirstBackoff
+func (c *Client) retry(ctx context.Context, fn func() error) error {
+	backoff := c.retryFirstBackoff
 	var last error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -356,7 +409,21 @@ var webBootstrapScript = regexp.MustCompile(`(?s)<script[^>]*id=["']sota\.config
 // the server embeds into the inbox page as a prefetched /api/v1/user/short
 // response. Fetching that page needs only the session cookies, so a session
 // whose token expired can be refreshed without signing in again.
-func (c *Client) FetchWebToken(ctx context.Context) (token, email string, err error) {
+func (c *Client) FetchWebToken(ctx context.Context) (string, string, error) {
+	var token, email string
+	err := c.retry(ctx, func() error {
+		var err error
+		token, email, err = c.fetchWebTokenOnce(ctx)
+		return err
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return token, email, nil
+}
+
+// fetchWebTokenOnce performs one bootstrap fetch; FetchWebToken adds retries.
+func (c *Client) fetchWebTokenOnce(ctx context.Context) (token, email string, err error) {
 	ui, err := c.webUIURL()
 	if err != nil {
 		return "", "", err
@@ -373,8 +440,9 @@ func (c *Client) FetchWebToken(ctx context.Context) (token, email string, err er
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("open web UI: %w", err)
+		return "", "", fmt.Errorf("open web UI: %w", sanitizeTransportError(err))
 	}
+	// NOERR: the body is read below; a close error cannot change the result.
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, errorBodyBytes))
@@ -432,30 +500,34 @@ func parseWebBootstrap(html []byte) (token, email string, err error) {
 	return "", "", errors.New("web UI bootstrap has no user/short response")
 }
 
+// getEnvelope performs a retried GET and returns the decoded envelope.
+func (c *Client) getEnvelope(ctx context.Context, path string, params url.Values, timeout time.Duration, limit int64) (envelope, error) {
+	var env envelope
+	err := c.retry(ctx, func() error {
+		raw, err := c.getBytes(ctx, path, params, timeout, limit)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return fmt.Errorf("decode envelope: %w", err)
+		}
+		return classifyEnvelope(env.Status)
+	})
+	if err != nil {
+		return envelope{}, err
+	}
+	return env, nil
+}
+
 // Probe checks the credentials with the cheapest list call and returns the
 // canonical mailbox address the API resolved them to. The address is empty
 // when the response does not report one.
 func (c *Client) Probe(ctx context.Context) (string, error) {
-	var email string
-	err := retry(ctx, func() error {
-		raw, err := c.getBytes(ctx, "threads/status/smart", listParams("0", 0, 1, OrderDesc), listTimeout, maxJSONBytes)
-		if err != nil {
-			return err
-		}
-		var env envelope
-		if err := json.Unmarshal(raw, &env); err != nil {
-			return fmt.Errorf("decode envelope: %w", err)
-		}
-		if err := classifyEnvelope(env.Status); err != nil {
-			return err
-		}
-		email = strings.TrimSpace(env.Email)
-		return nil
-	})
+	env, err := c.getEnvelope(ctx, "threads/status/smart", listParams("0", 0, 1, OrderDesc), probeTimeout, maxJSONBytes)
 	if err != nil {
 		return "", err
 	}
-	return email, nil
+	return strings.TrimSpace(env.Email), nil
 }
 
 // Folders returns the complete folder tree.
@@ -509,7 +581,7 @@ func (c *Client) DownloadRaw(ctx context.Context, messageID, folderID string) ([
 		"folder_id": {folderID},
 	}
 	var data []byte
-	err := retry(ctx, func() error {
+	err := c.retry(ctx, func() error {
 		raw, err := c.getBytes(ctx, "messages/message/download", params, downloadTimeout, maxMessageBytes)
 		if err != nil {
 			return err

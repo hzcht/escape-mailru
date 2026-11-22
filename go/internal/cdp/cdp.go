@@ -59,6 +59,7 @@ func Dial(ctx context.Context, wsURL string) (*Conn, error) {
 		waiters: make(map[int]chan callResult),
 		done:    make(chan struct{}),
 	}
+	// Lifecycle: the read loop ends when the websocket closes.
 	go c.loop()
 	return c, nil
 }
@@ -98,7 +99,7 @@ func (c *Conn) Call(ctx context.Context, method string, params, out any) error {
 		c.dropWaiter(id)
 		return fmt.Errorf("cdp: encode %s: %w", method, err)
 	}
-	if err := c.ws.writeFrame(0x1, raw); err != nil {
+	if err := c.ws.writeFrameContext(ctx, 0x1, raw); err != nil {
 		c.dropWaiter(id)
 		return fmt.Errorf("cdp: send %s: %w", method, err)
 	}

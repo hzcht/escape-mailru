@@ -148,11 +148,18 @@ func TestGateSession(t *testing.T) {
 		}
 	})
 	t.Run("rejected blocks save", func(t *testing.T) {
-		srv := newServer(http.StatusForbidden, `forbidden`)
+		srv := newServer(http.StatusForbidden, `{"status":403,"body":{}}`)
 		defer srv.Close()
 		err := gateSession(cliFlags{baseURL: srv.URL + "/api/v1"}, s)
 		if !errors.Is(err, mailapi.ErrAuth) {
 			t.Fatalf("err = %v, want ErrAuth", err)
+		}
+	})
+	t.Run("plain 403 does not block save", func(t *testing.T) {
+		srv := newServer(http.StatusForbidden, `forbidden`)
+		defer srv.Close()
+		if err := gateSession(cliFlags{baseURL: srv.URL + "/api/v1"}, s); err != nil {
+			t.Fatalf("gateSession: %v", err)
 		}
 	})
 	t.Run("non-auth failure does not block save", func(t *testing.T) {

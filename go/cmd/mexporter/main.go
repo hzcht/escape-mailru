@@ -102,7 +102,7 @@ func run(args []string) int {
 	}
 	cli := mailapi.New(mailapi.Options{
 		Email:        sess.Email,
-		AccessToken:  sess.AccessToken,
+		LegacyToken:  sess.AccessToken,
 		Token:        sess.Token,
 		CookieHeader: sess.CookieHeader(time.Now()),
 		BaseURL:      fl.baseURL,
@@ -451,7 +451,7 @@ func gateSession(fl cliFlags, s session.Session) error {
 	defer cancel()
 	cli := mailapi.New(mailapi.Options{
 		Email:        s.Email,
-		AccessToken:  s.AccessToken,
+		LegacyToken:  s.AccessToken,
 		Token:        s.Token,
 		CookieHeader: s.CookieHeader(time.Now()),
 		BaseURL:      fl.baseURL,
@@ -502,7 +502,7 @@ func runRefreshSession(fl cliFlags) int {
 
 	bootstrap := mailapi.New(mailapi.Options{
 		Email:        sess.Email,
-		AccessToken:  sess.AccessToken,
+		LegacyToken:  sess.AccessToken,
 		Token:        sess.Token,
 		CookieHeader: sess.CookieHeader(time.Now()),
 		BaseURL:      fl.baseURL,
@@ -688,7 +688,7 @@ func promptSession(in io.Reader, out io.Writer) (session.Session, error) {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return session.Session{}, fmt.Errorf("parse session JSON: %w", err)
 	}
-	if err := session.Validate(s); err != nil {
+	if err := session.Validate(s, time.Now()); err != nil {
 		return session.Session{}, err
 	}
 	return s, nil

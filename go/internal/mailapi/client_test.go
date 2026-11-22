@@ -7,31 +7,23 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestMain(m *testing.M) {
-	old := retryFirstBackoff
-	retryFirstBackoff = time.Millisecond
-	code := m.Run()
-	retryFirstBackoff = old
-	os.Exit(code)
-}
-
 func testServer(t *testing.T, handler http.HandlerFunc) *Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	return New(Options{
-		Email:        "user@mail_ru_hosted_domain",
-		AccessToken:  "token",
-		CookieHeader: "s=1; t=2",
-		UserAgent:    "test-agent",
-		BaseURL:      srv.URL + "/api/v1",
+		Email:             "user@mail_ru_hosted_domain",
+		LegacyToken:       "token",
+		CookieHeader:      "s=1; t=2",
+		UserAgent:         "test-agent",
+		BaseURL:           srv.URL + "/api/v1",
+		RetryFirstBackoff: time.Millisecond,
 	})
 }
 
@@ -218,30 +210,60 @@ func TestDownloadRawEnvelopeError(t *testing.T) {
 
 func TestHTTPStatusClassification(t *testing.T) {
 	tests := []struct {
+		name string
 		code int
+		body string
 		want error
 	}{
-		{http.StatusUnauthorized, ErrAuth},
-		{http.StatusForbidden, ErrAuth},
-		{http.StatusTooManyRequests, ErrRateLimited},
-		{http.StatusServiceUnavailable, ErrRateLimited},
-		{http.StatusInternalServerError, &APIError{Status: 500}},
+		{"unauthorized", http.StatusUnauthorized, "", ErrAuth},
+		{"forbidden plain", http.StatusForbidden, "forbidden", &APIError{Status: http.StatusForbidden}},
+		{"forbidden auth envelope", http.StatusForbidden, `{"status":403,"body":{}}`, ErrAuth},
+		{"rate limited", http.StatusTooManyRequests, "", ErrRateLimited},
+		{"unavailable", http.StatusServiceUnavailable, "", ErrRateLimited},
+		{"server error", http.StatusInternalServerError, "", &APIError{Status: http.StatusInternalServerError}},
 	}
 	for _, tt := range tests {
-		client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(tt.code)
-		})
-		_, err := client.Folders(context.Background())
-		if tt.want == ErrAuth || tt.want == ErrRateLimited {
-			if !errors.Is(err, tt.want) {
+		t.Run(tt.name, func(t *testing.T) {
+			client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.code)
+				_, _ = w.Write([]byte(tt.body))
+			})
+			_, err := client.Folders(context.Background())
+			if tt.want == ErrAuth || tt.want == ErrRateLimited {
+				if !errors.Is(err, tt.want) {
+					t.Fatalf("%d: err = %v", tt.code, err)
+				}
+				return
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.Status != tt.code {
 				t.Fatalf("%d: err = %v", tt.code, err)
 			}
-			continue
+		})
+	}
+}
+
+func TestErrorDoesNotLeakToken(t *testing.T) {
+	client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("hijack unsupported")
+			return
 		}
-		var apiErr *APIError
-		if !errors.As(err, &apiErr) || apiErr.Status != tt.code {
-			t.Fatalf("%d: err = %v", tt.code, err)
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Error(err)
+			return
 		}
+		// NOERR: closing the socket without a response triggers the transport error.
+		_ = conn.Close()
+	})
+	_, err := client.Folders(context.Background())
+	if err == nil {
+		t.Fatal("expected transport error")
+	}
+	if strings.Contains(err.Error(), "token=") {
+		t.Fatalf("error leaks the token query: %v", err)
 	}
 }
 
@@ -326,7 +348,7 @@ func TestLookalikeJSONAndCanceledContext(t *testing.T) {
 }
 
 func TestBuildURL(t *testing.T) {
-	c := New(Options{Email: "e", AccessToken: "t", BaseURL: "https://example.test/api/"})
+	c := New(Options{Email: "e", LegacyToken: "t", BaseURL: "https://example.test/api/"})
 	raw := c.buildURL("x", url.Values{"a": {"b"}})
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -338,7 +360,7 @@ func TestBuildURL(t *testing.T) {
 }
 
 func TestBuildURLPrefersWebToken(t *testing.T) {
-	c := New(Options{Email: "e", AccessToken: "a", Token: "w", BaseURL: "https://example.test/api/"})
+	c := New(Options{Email: "e", LegacyToken: "a", Token: "w", BaseURL: "https://example.test/api/"})
 	u, err := url.Parse(c.buildURL("x", nil))
 	if err != nil {
 		t.Fatal(err)
@@ -370,6 +392,26 @@ func TestFetchWebToken(t *testing.T) {
 	}
 	if token != "web-token" || email != "user@example.test" {
 		t.Fatalf("token = %q, email = %q", token, email)
+	}
+}
+
+func TestFetchWebTokenRetriesTransientStatus(t *testing.T) {
+	var attempts atomic.Int32
+	client := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`<script id="sota.config">` +
+			`{"userConfig":{"api":[{"method":"/api/v1/user/short","data":{"status":"200","email":"u@example.test","body":{"token":"web-token"}}}]}}` +
+			`</script>`))
+	})
+	token, _, err := client.FetchWebToken(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "web-token" || attempts.Load() != 2 {
+		t.Fatalf("token = %q, attempts = %d", token, attempts.Load())
 	}
 }
 

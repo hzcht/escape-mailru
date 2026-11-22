@@ -38,7 +38,7 @@ type Session struct {
 //
 // REQ-EXPORT-010:
 //   - Pre-conditions: path points to a JSON object exported from the browser.
-//   - Post-conditions: returned session has email, access_token and at least one cookie.
+//   - Post-conditions: returned session has email, a token (web or legacy) and at least one cookie.
 //   - Errors: wraps filesystem, JSON and validation failures.
 func Load(path string) (Session, error) {
 	var s Session
@@ -49,14 +49,15 @@ func Load(path string) (Session, error) {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return s, fmt.Errorf("REQ-EXPORT-010: parse session: %w", err)
 	}
-	if err := Validate(s); err != nil {
+	if err := Validate(s, time.Now()); err != nil {
 		return Session{}, err
 	}
 	return s, nil
 }
 
 // Validate reports whether the session has the minimum required fields.
-func Validate(s Session) error {
+// The current time is passed in so validation is deterministic in tests.
+func Validate(s Session, now time.Time) error {
 	switch {
 	case s.Email == "":
 		return fmt.Errorf("REQ-EXPORT-010: session email is empty")
@@ -64,7 +65,7 @@ func Validate(s Session) error {
 		return fmt.Errorf("REQ-EXPORT-010: session has neither access_token nor token")
 	case len(s.Cookies) == 0:
 		return fmt.Errorf("REQ-EXPORT-010: session cookies are empty")
-	case s.CookieHeader(time.Now()) == "":
+	case s.CookieHeader(now) == "":
 		return fmt.Errorf("REQ-EXPORT-010: session has no usable, unexpired cookies")
 	}
 	return nil
@@ -74,7 +75,7 @@ func Validate(s Session) error {
 //
 // REQ-EXPORT-010: the session contains secrets and is only stored at the requested path.
 func Save(path string, s Session) error {
-	if err := Validate(s); err != nil {
+	if err := Validate(s, time.Now()); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -127,19 +128,42 @@ func (s Session) CookieHeader(now time.Time) string {
 	return strings.Join(parts, "; ")
 }
 
-// ExpiryWarning reports cookies that expire soon without exposing values.
+// ExpiryWarning reports cookies from mail domains that expire within seven
+// days without exposing values. Already expired and unrelated cookies are not
+// reported: they cannot be used for the API anyway.
 func ExpiryWarning(s Session, now time.Time) string {
+	unix := float64(now.Unix())
 	deadline := now.Add(7 * 24 * time.Hour).Unix()
 	names := make([]string, 0, 4)
 	for _, c := range s.Cookies {
-		if c.Expires > 0 && int64(c.Expires) <= deadline {
-			names = append(names, c.Name)
+		if !AcceptsDomain(c.Domain) {
+			continue
 		}
+		if c.Expires <= unix || int64(c.Expires) > deadline {
+			continue
+		}
+		names = append(names, c.Name)
 	}
 	if len(names) == 0 {
 		return ""
 	}
 	return fmt.Sprintf("%d cookie(s) expire within 7 days: %s", len(names), strings.Join(names, ", "))
+}
+
+// EarliestExpiry returns the soonest cookie expiry among cookies that are sent
+// to the mail API. The boolean is false when no cookie expires.
+func EarliestExpiry(s Session) (time.Time, bool) {
+	var earliest time.Time
+	for _, c := range s.Cookies {
+		if c.Expires <= 0 || !AcceptsDomain(c.Domain) {
+			continue
+		}
+		at := time.Unix(int64(c.Expires), 0)
+		if earliest.IsZero() || at.Before(earliest) {
+			earliest = at
+		}
+	}
+	return earliest, !earliest.IsZero()
 }
 
 // AcceptsDomain reports whether a cookie from domain is forwarded to the mail

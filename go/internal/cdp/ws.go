@@ -122,6 +122,31 @@ func acceptKey(key string) string {
 	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
+// writeFrameContext sends one frame bounded by the call context. Without a
+// deadline a wedged browser could block the write forever, because the
+// connection deadline is cleared after the handshake.
+func (w *wsConn) writeFrameContext(ctx context.Context, opcode byte, payload []byte) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := w.conn.SetWriteDeadline(deadline); err != nil {
+			return err
+		}
+		// NOERR: clearing the deadline cannot invalidate a written frame.
+		defer func() { _ = w.conn.SetWriteDeadline(time.Time{}) }()
+	}
+	stop := context.AfterFunc(ctx, func() {
+		// NOERR: the expired deadline is only a wake-up signal for a blocked write.
+		_ = w.conn.SetWriteDeadline(time.Unix(1, 0))
+	})
+	defer stop()
+	if err := w.writeFrame(opcode, payload); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return err
+	}
+	return nil
+}
+
 // writeFrame sends one masked frame. Clients must mask; servers must not.
 func (w *wsConn) writeFrame(opcode byte, payload []byte) error {
 	w.writeMu.Lock()
