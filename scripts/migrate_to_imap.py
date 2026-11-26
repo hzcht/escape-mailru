@@ -11,14 +11,18 @@
 # Requires: Python 3 standard library (imaplib, email, argparse, json, pathlib, etc.).
 
 import argparse
+import base64
 import hashlib
 import imaplib
-import email
 import os
+import re
 import sys
 import json
 import socket
 import time
+from datetime import datetime, timezone
+from email.parser import BytesHeaderParser
+from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
 
 LOG_FILE = None
@@ -36,6 +40,28 @@ _RESERVED_NAME_BASES = {
     "nul",
     *(f"com{i}" for i in range(1, 10)),
     *(f"lpt{i}" for i in range(1, 10)),
+}
+
+# Локальные имена папок → стандартные папки IMAP.
+# Ключи нормализованы: нижний регистр, «ё» заменена на «е», пробелы схлопнуты.
+_FOLDER_ALIASES = {
+    "inbox": "INBOX",
+    "входящие": "INBOX",
+    "sent": "Sent",
+    "sent items": "Sent",
+    "sent mail": "Sent",
+    "отправленные": "Sent",
+    "drafts": "Drafts",
+    "draft": "Drafts",
+    "черновики": "Drafts",
+    "trash": "Trash",
+    "deleted items": "Trash",
+    "deleted": "Trash",
+    "корзина": "Trash",
+    "удаленные": "Trash",
+    "junk": "Junk",
+    "spam": "Junk",
+    "спам": "Junk",
 }
 
 
@@ -77,6 +103,199 @@ def diag(message):
         print(line, flush=True)
 
 
+def encode_mailbox(name):
+    """Закодировать имя папки в modified UTF-7 (RFC 3501)."""
+    out = []
+    buf = []
+
+    def flush():
+        if not buf:
+            return
+        raw = "".join(buf).encode("utf-16-be")
+        encoded = base64.b64encode(raw).decode("ascii").rstrip("=")
+        out.append("&" + encoded.replace("/", ",") + "-")
+        buf.clear()
+
+    for ch in name:
+        if 0x20 <= ord(ch) <= 0x7E:
+            flush()
+            out.append("&-" if ch == "&" else ch)
+        else:
+            buf.append(ch)
+    flush()
+    return "".join(out)
+
+
+def decode_mailbox(name):
+    """Декодировать modified UTF-7 в обычный Unicode."""
+
+    def replace(match):
+        token = match.group(1)
+        if not token:
+            return "&"
+        encoded = token.replace(",", "/")
+        encoded += "=" * (-len(encoded) % 4)
+        return base64.b64decode(encoded).decode("utf-16-be")
+
+    return re.sub(r"&([^-]*)-", replace, name)
+
+
+def map_folder_name(name):
+    """Сопоставить локальное имя папки стандартному имени IMAP."""
+    key = " ".join(name.split()).casefold().replace("ё", "е")
+    return _FOLDER_ALIASES.get(key, name.strip())
+
+
+def target_mailbox(eml_path, folder_root, default_mailbox, preserve, delimiter):
+    """Вычислить целевую IMAP-папку для файла по его пути в экспорте."""
+    if not preserve:
+        return default_mailbox
+    try:
+        rel = eml_path.resolve().relative_to(folder_root)
+    except ValueError:
+        return default_mailbox
+    parent = rel.parent
+    if parent == Path("."):
+        return default_mailbox
+    parts = list(parent.parts)
+    mapped = map_folder_name(parts[0])
+    rest = parts[1:]
+    # У INBOX не может быть дочерних папок: вложенность под «Входящими»
+    # поднимаем на верхний уровень.
+    if mapped.upper() == "INBOX" and rest:
+        return delimiter.join(rest)
+    return delimiter.join([mapped, *rest])
+
+
+def _parse_list_line(line):
+    """Разобрать строку ответа IMAP LIST."""
+    match = re.match(
+        rb'\((?P<flags>[^)]*)\)\s+"(?P<delim>[^"]*)"\s+(?P<name>.+?)\s*$', line
+    )
+    if not match:
+        return None
+    name = match.group("name").strip()
+    if name.startswith(b'"') and name.endswith(b'"') and len(name) >= 2:
+        name = name[1:-1]
+    try:
+        name = decode_mailbox(name.decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        name = name.decode("utf-8", "replace")
+    return (
+        match.group("flags").decode("ascii", "replace"),
+        match.group("delim").decode("ascii", "replace"),
+        name,
+    )
+
+
+def list_mailboxes(mail):
+    """Получить разделитель иерархии и существующие папки сервера."""
+    delimiter = "/"
+    folders = {}
+    try:
+        typ, data = mail.list()
+    except Exception as exc:
+        diag(f"LIST failed: {exc}")
+        return delimiter, folders
+    if typ != "OK":
+        diag(f"LIST returned {typ}: {data}")
+        return delimiter, folders
+    for line in data or []:
+        if not isinstance(line, bytes):
+            continue
+        parsed = _parse_list_line(line)
+        if not parsed:
+            continue
+        _flags, delim, name = parsed
+        if delim:
+            delimiter = delim
+        folders.setdefault(name.casefold(), name)
+    return delimiter, folders
+
+
+def resolve_mailbox(mail, name, folders, delimiter):
+    """Найти существующую папку или создать её (вместе с родителями)."""
+    if name.upper() == "INBOX":
+        return "INBOX"
+    key = name.casefold()
+    if key in folders:
+        return folders[key]
+    # Некоторые серверы держат личные папки внутри INBOX (INBOX.Sent).
+    inbox_key = ("INBOX" + delimiter + name).casefold()
+    if inbox_key in folders:
+        return folders[inbox_key]
+
+    parts = name.split(delimiter) if delimiter and delimiter in name else [name]
+    current = []
+    for part in parts:
+        current.append(part)
+        path = delimiter.join(current)
+        if path.upper() == "INBOX" or path.casefold() in folders:
+            continue
+        typ, data = mail.create(encode_mailbox(path))
+        message = b" ".join(
+            item for item in (data or []) if isinstance(item, bytes)
+        ).decode("utf-8", "replace")
+        if typ != "OK" and "exist" not in message.casefold():
+            raise RuntimeError(f"CREATE {path!r} failed: {typ} {message}")
+        folders[path.casefold()] = path
+    return name
+
+
+def _parse_datetime(value):
+    """Разобрать дату заголовка; вернуть aware datetime или None."""
+    try:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if not (1970 <= dt.year <= 2100):
+        return None
+    return dt
+
+
+def message_datetime(msg, eml_path):
+    """Дата письма: Date → Received → дата в имени файла → mtime."""
+    dt = _parse_datetime(msg.get("Date") or "")
+    if dt:
+        return dt
+    for received in msg.get_all("Received") or []:
+        if ";" in received:
+            candidate = " ".join(received.rsplit(";", 1)[1].split())
+            dt = _parse_datetime(candidate)
+            if dt:
+                return dt
+    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?:_|$)", eml_path.name)
+    if match:
+        try:
+            return datetime(
+                int(match.group(1)),
+                int(match.group(2)),
+                int(match.group(3)),
+                tzinfo=timezone.utc,
+            )
+        except ValueError:
+            pass
+    return datetime.fromtimestamp(eml_path.stat().st_mtime, tz=timezone.utc)
+
+
+def prepare_message(eml_path, add_missing_date):
+    """Прочитать .eml, вычислить INTERNALDATE и при необходимости добавить Date."""
+    with open(eml_path, "rb") as f:
+        raw = f.read()
+    msg = BytesHeaderParser().parsebytes(raw)
+    dt = message_datetime(msg, eml_path)
+    has_date = bool(msg.get("Date") and msg.get("Date").strip())
+    if add_missing_date and not has_date:
+        header = format_datetime(dt)
+        raw = b"Date: " + header.encode("ascii") + b"\r\n" + raw
+        diag(f"DATE added file={eml_path} date={header}")
+    return raw, imaplib.Time2Internaldate(dt.timestamp()), dt
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Миграция локальных .eml писем на IMAP-сервер"
@@ -113,7 +332,15 @@ def parse_args():
         "--mailbox",
         type=str,
         default="",
-        help="Целевая папка IMAP (по умолчанию: INBOX)",
+        help=(
+            "Папка для файлов в корне --folder (по умолчанию: INBOX); "
+            "при --flatten — для всех писем"
+        ),
+    )
+    parser.add_argument(
+        "--flatten",
+        action="store_true",
+        help="Сложить все письма в одну папку --mailbox (старое поведение)",
     )
     parser.add_argument(
         "--state",
@@ -146,6 +373,14 @@ def parse_args():
         "--no-ssl",
         action="store_true",
         help="Использовать нешифрованное соединение (порт 143)",
+    )
+    parser.add_argument(
+        "--keep-bytes",
+        action="store_true",
+        help=(
+            "Не добавлять заголовок Date письмам без него "
+            "(дата в клиенте может остаться 1970)"
+        ),
     )
     return parser.parse_args()
 
@@ -197,55 +432,15 @@ def find_eml_files(folder_path):
 
 
 def parse_eml_file(filepath):
-    """Парсинг .eml файла и извлечение заголовков."""
+    """Прочитать заголовки .eml, не разбирая тело и вложения."""
     try:
         with open(filepath, "rb") as f:
-            raw = f.read()
-        msg = email.message_from_bytes(raw)
-        # Извлекаем основные заголовки
-        subject = ""
-        sender = ""
-        date = ""
-        message_id = ""
-
-        if msg["Subject"]:
-            subject = msg["Subject"]
-        if msg["From"]:
-            sender = msg["From"]
-        if msg["Date"]:
-            date = msg["Date"]
-        if msg["Message-ID"]:
-            message_id = msg["Message-ID"]
-
-        # Конвертируем body в plain текст
-        body = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                content_type = part.get_content_type()
-                if content_type == "text/plain":
-                    charset = part.get_content_charset()
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        try:
-                            body = payload.decode(charset or "utf-8", errors="replace")
-                        except Exception:
-                            body = payload.decode("utf-8", errors="replace")
-                    break
-        else:
-            charset = msg.get_content_charset()
-            payload = msg.get_payload(decode=True)
-            if payload:
-                try:
-                    body = payload.decode(charset or "utf-8", errors="replace")
-                except Exception:
-                    body = payload.decode("utf-8", errors="replace")
-
+            msg = BytesHeaderParser().parse(f)
         return {
-            "subject": subject,
-            "sender": sender,
-            "date": date,
-            "message_id": message_id,
-            "body": body,
+            "subject": msg.get("Subject", ""),
+            "sender": msg.get("From", ""),
+            "date": msg.get("Date", ""),
+            "message_id": msg.get("Message-ID", ""),
             "file": str(filepath),
         }
     except Exception as e:
@@ -253,29 +448,25 @@ def parse_eml_file(filepath):
         return None
 
 
-def upload_message(mail, folder_name, message_data):
-    """Загрузка одного письма на IMAP сервер без изменения байтов .eml."""
+def upload_message(mail, folder_name, message_data, raw_msg, internaldate):
+    """Загрузить готовые байты письма с вычисленным INTERNALDATE."""
     label = message_data.get("subject", "без темы")
     source = message_data.get("file", "")
     started = time.monotonic()
-    diag(f"APPEND start file={source}")
+    diag(f"APPEND start mailbox={folder_name} date={internaldate} file={source}")
     try:
         # Пересборка Message меняет переводы строк, порядок заголовков и границы MIME,
         # поэтому отправляем исходные байты файла как есть.
-        with open(message_data["file"], "rb") as f:
-            raw_msg = f.read()
-
-        # imaplib.append(mailbox, flags, date_time, message)
         result, data = mail.append(
-            folder_name,
+            encode_mailbox(folder_name),
             "\\Seen",  # метка прочитанного (можно изменить)
-            None,
+            internaldate,
             raw_msg,
         )
         elapsed = time.monotonic() - started
 
         if result == "OK":
-            diag(f"APPEND ok in {elapsed:.2f}s file={source}")
+            diag(f"APPEND ok in {elapsed:.2f}s mailbox={folder_name} file={source}")
             return True
         print(f"⚠️ IMAP APPEND вернул: {result} - {data}")
         diag(f"APPEND fail in {elapsed:.2f}s result={result} data={data} file={source}")
@@ -429,10 +620,20 @@ def main():
     # --folder — локальный путь; --mailbox — отдельный параметр IMAP-папки.
     mailbox = args.mailbox or "INBOX"
     folder_root = Path(args.folder).resolve()
+    preserve_folders = not args.flatten
     state_path.parent.mkdir(parents=True, exist_ok=True)
     uploaded = load_uploaded(state_path)
 
-    print(f"📤 Начинаем миграцию в папку: {mailbox}")
+    if preserve_folders:
+        delimiter, server_folders = list_mailboxes(mail)
+        print(
+            "📁 Структура папок сохраняется; стандартные имена маппятся на "
+            "INBOX/Sent/Drafts/Trash/Junk"
+        )
+    else:
+        delimiter, server_folders = "/", {}
+        print(f"📤 Все письма загружаются в папку: {mailbox}")
+
     print(
         f"🔗 Сервер: {args.server}:{args.port} (SSL={use_ssl}, таймаут {args.timeout:g}с)"
     )
@@ -442,12 +643,14 @@ def main():
     print("-" * 60)
     diag(
         f"START server={args.server}:{args.port} ssl={use_ssl} mailbox={mailbox} "
-        f"timeout={args.timeout:g}s"
+        f"flatten={args.flatten} timeout={args.timeout:g}s"
     )
     diag(
         f"CONFIG folder={folder_root} state={state_path} log={log_path} "
         f"total={len(eml_files)} journal={len(uploaded)}"
     )
+    if preserve_folders:
+        diag(f"FOLDERS delimiter={delimiter!r} existing={len(server_folders)}")
 
     success_count = 0
     fail_count = 0
@@ -457,9 +660,13 @@ def main():
     state_file = open(state_path, "a", encoding="utf-8")
     try:
         for i, eml_path in enumerate(eml_files, 1):
-            key = message_key(eml_path, folder_root, args.server, login, mailbox)
+            target = target_mailbox(
+                eml_path, folder_root, mailbox, preserve_folders, delimiter
+            )
+            key = message_key(eml_path, folder_root, args.server, login, target)
             diag(
-                f"[{i}/{len(eml_files)}] process file={eml_path} size={eml_path.stat().st_size}"
+                f"[{i}/{len(eml_files)}] process file={eml_path} "
+                f"mailbox={target} size={eml_path.stat().st_size}"
             )
             if key in uploaded:
                 diag(f"[{i}/{len(eml_files)}] skip journal file={eml_path}")
@@ -473,15 +680,36 @@ def main():
                     )
                 continue
 
-            # Парсим файл
+            # Парсим заголовки
             msg_data = parse_eml_file(eml_path)
             if msg_data is None:
                 diag(f"[{i}/{len(eml_files)}] parse failed file={eml_path}")
                 skipped_count += 1
                 continue
 
+            # Готовим байты и INTERNALDATE (Date добавляется только при отсутствии)
+            try:
+                raw_msg, internaldate, _dt = prepare_message(
+                    eml_path, add_missing_date=not args.keep_bytes
+                )
+            except Exception as exc:
+                fail_count += 1
+                print(f"❌ Не удалось прочитать {eml_path}: {exc}")
+                diag(f"READ error file={eml_path}: {exc}")
+                continue
+
+            # Папку создаём только для писем, которые реально будем загружать.
+            if preserve_folders:
+                try:
+                    target = resolve_mailbox(mail, target, server_folders, delimiter)
+                except Exception as exc:
+                    fail_count += 1
+                    print(f"❌ Не удалось создать папку {target}: {exc}")
+                    diag(f"MAILBOX error target={target} file={eml_path}: {exc}")
+                    continue
+
             # Загрузка письма
-            result = upload_message(mail, mailbox, msg_data)
+            result = upload_message(mail, target, msg_data, raw_msg, internaldate)
             if result is True:
                 success_count += 1
                 uploaded.add(key)
